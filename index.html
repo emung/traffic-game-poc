@@ -53,17 +53,23 @@
       <div>nodes <b id="n-nodes">0</b> &nbsp; edges <b id="n-edges">0</b></div>
       <div>junctions <b id="n-junctions">0</b> &nbsp; dead ends <b id="n-deadends">0</b></div>
       <div>network <b id="n-length">0 m</b></div>
+      <hr style="border:0;border-top:1px solid #262c37;margin:8px 0" />
+      <div>cars <b id="n-cars">0</b> &nbsp; avg <b id="n-speed">0 km/h</b></div>
+      <div>arrived <b id="n-arrived">0</b> &nbsp; trip <b id="n-trip">--</b></div>
     </div>
 
     <div class="panel" id="tools">
       <button data-tool="draw" class="active">Draw</button>
       <button data-tool="erase">Erase</button>
+      <span style="width:1px;background:#2c333f;margin:0 2px"></span>
+      <button id="play">Play</button>
     </div>
 
     <div class="panel" id="help">
       <div><kbd>drag</kbd> draw a road &nbsp;·&nbsp; <kbd>D</kbd> draw &nbsp;·&nbsp; <kbd>E</kbd> erase</div>
       <div><kbd>space</kbd>/<kbd>middle</kbd> pan &nbsp;·&nbsp; <kbd>wheel</kbd> zoom &nbsp;·&nbsp; <kbd>G</kbd> debug &nbsp;·&nbsp; <kbd>F</kbd> fit</div>
       <div><kbd>⌘Z</kbd> undo &nbsp;·&nbsp; <kbd>C</kbd> clear all</div>
+      <div><kbd>P</kbd> play/pause traffic &nbsp;·&nbsp; <kbd>R</kbd> reset traffic</div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

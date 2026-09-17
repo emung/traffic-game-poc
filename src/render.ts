@@ -1,7 +1,8 @@
 import { type Vec2 } from './geom';
 import { type RoadEdge, type RoadGraph } from './graph';
 import { type Camera } from './camera';
-import { COLORS, ROAD_WIDTH, SNAP_RADIUS } from './config';
+import { COLORS, ROAD_WIDTH, SNAP_RADIUS, CAR_LENGTH, CAR_WIDTH } from './config';
+import { type TrafficSim } from './traffic';
 
 export interface ViewState {
   liveStroke: Vec2[] | null;
@@ -146,10 +147,37 @@ function drawLabels(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGraph
   }
 }
 
+function drawVehicles(ctx: CanvasRenderingContext2D, sim: TrafficSim): void {
+  for (const v of sim.vehicles) {
+    const pose = sim.poseOf(v);
+    if (!pose) continue;
+    const ratio = Math.min(1, v.v / v.desiredSpeed);
+    ctx.save();
+    ctx.translate(pose.pos.x, pose.pos.y);
+    ctx.rotate(Math.atan2(pose.dir.y, pose.dir.x));
+    ctx.fillStyle = `hsl(${Math.round(ratio * 115)}, 82%, 62%)`;
+    ctx.fillRect(-CAR_LENGTH, -CAR_WIDTH / 2, CAR_LENGTH, CAR_WIDTH);
+    ctx.restore();
+  }
+}
+
+function drawBusyJunctions(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGraph, sim: TrafficSim): void {
+  ctx.strokeStyle = COLORS.junctionBusy;
+  ctx.lineWidth = 1.2 / cam.zoom;
+  for (const nodeId of sim.junctions.keys()) {
+    const node = graph.nodes.get(nodeId);
+    if (!node) continue;
+    ctx.beginPath();
+    ctx.arc(node.pos.x, node.pos.y, 5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
 export function render(
   ctx: CanvasRenderingContext2D,
   cam: Camera,
   graph: RoadGraph,
+  sim: TrafficSim,
   view: ViewState,
 ): void {
   ctx.setTransform(cam.dpr, 0, 0, cam.dpr, 0, 0);
@@ -161,6 +189,8 @@ export function render(
   drawGrid(ctx, cam);
   drawRoads(ctx, graph, view);
   drawNodes(ctx, graph, cam);
+  drawVehicles(ctx, sim);
+  if (view.debug) drawBusyJunctions(ctx, cam, graph, sim);
   drawOverlay(ctx, cam, view);
   if (view.debug) drawDebug(ctx, cam, graph, view);
   ctx.restore();

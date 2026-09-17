@@ -12,6 +12,39 @@ export const MIN_ROAD_LENGTH = 12;
 export const SAMPLE_SPACING_PX = 3;
 export const UNDO_LIMIT = 50;
 
+// --- traffic ---
+/** Lane centre distance from the road centreline; roads are ROAD_WIDTH wide, two lanes. */
+export const LANE_OFFSET = 2;
+export const CAR_LENGTH = 4.4;
+export const CAR_WIDTH = 1.9;
+/** 50 km/h in m/s. */
+export const DESIRED_SPEED = 13.9;
+export const SPEED_VARIATION = 0.18;
+export const MAX_ACCEL = 1.8;
+export const COMFORT_BRAKE = 2.2;
+export const MAX_BRAKE = 8;
+export const MIN_GAP = 2;
+export const TIME_HEADWAY = 1.1;
+/** Half-size of the box a vehicle reserves when crossing a junction. */
+export const JUNCTION_RADIUS = 5;
+/**
+ * How close to the junction a vehicle gets before it tries to claim it. Kept short: a vehicle
+ * holds the box from here until it has cleared it, so claiming early throttles the junction.
+ */
+export const JUNCTION_CLAIM_DIST = 8;
+/** Deceleration assumed when working out how early a vehicle must claim a junction. */
+export const CLAIM_BRAKE = 3.5;
+export const SPAWN_INTERVAL = 0.5;
+export const MAX_VEHICLES = 300;
+/**
+ * Share of road capacity that traffic demand fills up to. Junctions, not road length, are the
+ * real bottleneck: one vehicle at a time holds a junction for roughly 3s, capping it near 20
+ * vehicles a minute, so demand has to sit far below what the tarmac would physically hold.
+ */
+export const TARGET_OCCUPANCY = 0.06;
+export const SIM_STEP = 1 / 60;
+export const MAX_SUBSTEPS = 5;
+
 export const COLORS = {
   bg: '#11141a',
   gridMinor: '#191d25',
@@ -24,4 +57,8 @@ export const COLORS = {
   stroke: '#38bdf8',
   snap: '#22d3ee',
   erase: '#f87171',
+  carStopped: '#f87171',
+  carSlow: '#fbbf24',
+  carFast: '#4ade80',
+  junctionBusy: '#fbbf24',
 };

@@ -69,10 +69,13 @@ export class RoadGraph {
   readonly edges = new Map<number, RoadEdge>();
   private nextNode = 1;
   private nextEdge = 1;
+  /** Bumped on every structural change so dependants know to rebuild. */
+  version = 0;
 
   addNode(pos: Vec2): RoadNode {
     const node: RoadNode = { id: this.nextNode++, pos: clone(pos), edges: [] };
     this.nodes.set(node.id, node);
+    this.version++;
     return node;
   }
 
@@ -84,6 +87,7 @@ export class RoadGraph {
     this.edges.set(edge.id, edge);
     this.nodes.get(a)!.edges.push(edge.id);
     this.nodes.get(b)!.edges.push(edge.id);
+    this.version++;
     return edge;
   }
 
@@ -93,11 +97,15 @@ export class RoadGraph {
     unlink(this.nodes.get(edge.a), id);
     unlink(this.nodes.get(edge.b), id);
     this.edges.delete(id);
+    this.version++;
   }
 
   pruneOrphans(): void {
     for (const node of [...this.nodes.values()]) {
-      if (node.edges.length === 0) this.nodes.delete(node.id);
+      if (node.edges.length === 0) {
+        this.nodes.delete(node.id);
+        this.version++;
+      }
     }
   }
 
@@ -251,6 +259,7 @@ export class RoadGraph {
     this.edges.clear();
     this.nextNode = 1;
     this.nextEdge = 1;
+    this.version++;
   }
 
   toJSON(): string {

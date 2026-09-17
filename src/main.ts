@@ -2,12 +2,14 @@ import { type Vec2, dist } from './geom';
 import { RoadGraph, type RoadEdge } from './graph';
 import { Camera } from './camera';
 import { render, type ViewState } from './render';
-import { SAMPLE_SPACING_PX, SNAP_RADIUS, UNDO_LIMIT } from './config';
+import { TrafficSim } from './traffic';
+import { MAX_SUBSTEPS, SAMPLE_SPACING_PX, SIM_STEP, SNAP_RADIUS, UNDO_LIMIT } from './config';
 
 const canvas = document.getElementById('c') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
 const cam = new Camera();
 const graph = new RoadGraph();
+const sim = new TrafficSim();
 
 type Tool = 'draw' | 'erase';
 let tool: Tool = 'draw';
@@ -193,6 +195,7 @@ window.addEventListener('keydown', (e) => {
     const snapshot = undoStack.pop();
     if (snapshot) {
       graph.loadJSON(snapshot);
+      sim.reset();
       view.hoverEdge = null;
       persist();
     }
@@ -218,7 +221,14 @@ window.addEventListener('keydown', (e) => {
     case 'c':
       pushUndo();
       graph.clear();
+      sim.reset();
       persist();
+      break;
+    case 'p':
+      setRunning(!sim.running);
+      break;
+    case 'r':
+      sim.reset();
       break;
   }
 });
@@ -231,12 +241,26 @@ window.addEventListener('keyup', (e) => {
   }
 });
 
+const playBtn = document.getElementById('play') as HTMLButtonElement;
+
+function setRunning(run: boolean): void {
+  sim.running = run;
+  playBtn.textContent = run ? 'Pause' : 'Play';
+  playBtn.classList.toggle('active', run);
+}
+
+playBtn.addEventListener('click', () => setRunning(!sim.running));
+
 const el = {
   nodes: document.getElementById('n-nodes')!,
   edges: document.getElementById('n-edges')!,
   junctions: document.getElementById('n-junctions')!,
   deadends: document.getElementById('n-deadends')!,
   length: document.getElementById('n-length')!,
+  cars: document.getElementById('n-cars')!,
+  speed: document.getElementById('n-speed')!,
+  arrived: document.getElementById('n-arrived')!,
+  trip: document.getElementById('n-trip')!,
 };
 
 function updateHud(): void {
@@ -252,10 +276,32 @@ function updateHud(): void {
   el.deadends.textContent = String(deadends);
   const m = graph.totalLength();
   el.length.textContent = m > 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`;
+
+  const t = sim.stats();
+  el.cars.textContent = String(t.vehicles);
+  el.speed.textContent = `${t.avgSpeedKmh.toFixed(0)} km/h`;
+  el.arrived.textContent = String(t.arrivals);
+  el.trip.textContent = t.avgTripSeconds ? `${t.avgTripSeconds.toFixed(0)} s` : '--';
 }
 
-function frame(): void {
-  render(ctx, cam, graph, view);
+let lastTime = performance.now();
+let accumulator = 0;
+
+function frame(now: number): void {
+  accumulator += Math.min(0.25, (now - lastTime) / 1000);
+  lastTime = now;
+
+  let steps = 0;
+  while (accumulator >= SIM_STEP && steps < MAX_SUBSTEPS) {
+    sim.step(graph, SIM_STEP);
+    accumulator -= SIM_STEP;
+    steps++;
+  }
+  // Drop the backlog rather than spiralling if a frame ran long.
+  if (steps === MAX_SUBSTEPS) accumulator = 0;
+
+  sim.sync(graph);
+  render(ctx, cam, graph, sim, view);
   updateHud();
   requestAnimationFrame(frame);
 }
@@ -263,6 +309,7 @@ function frame(): void {
 window.addEventListener('resize', resize);
 resize();
 restore();
-frame();
+setRunning(true);
+requestAnimationFrame(frame);
 
-Object.assign(window, { graph, cam });
+Object.assign(window, { graph, cam, sim });

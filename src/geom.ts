@@ -16,6 +16,14 @@ export const len = (a: Vec2): number => Math.hypot(a.x, a.y);
 export const dist = (a: Vec2, b: Vec2): number => Math.hypot(b.x - a.x, b.y - a.y);
 export const cross = (a: Vec2, b: Vec2): number => a.x * b.y - a.y * b.x;
 
+export function normalize(a: Vec2): Vec2 {
+  const l = Math.hypot(a.x, a.y);
+  return l < 1e-9 ? { x: 0, y: 0 } : { x: a.x / l, y: a.y / l };
+}
+
+/** Unit normal pointing to the right of `dir`, in screen coordinates where y grows downward. */
+export const rightNormal = (dir: Vec2): Vec2 => ({ x: -dir.y, y: dir.x });
+
 export interface SegHit {
   /** Parameter along the first segment, 0..1. */
   t: number;
