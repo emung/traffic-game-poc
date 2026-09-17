@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Traffic Prototype — Road Drawing</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #11141a; }
+      canvas { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: crosshair; }
+      canvas.panning { cursor: grabbing; }
+      canvas.erasing { cursor: cell; }
+
+      .panel {
+        position: fixed;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #94a3b8;
+        background: rgba(17, 20, 26, 0.82);
+        border: 1px solid #262c37;
+        border-radius: 8px;
+        padding: 10px 12px;
+        backdrop-filter: blur(8px);
+        user-select: none;
+      }
+      #stats { top: 12px; left: 12px; }
+      #stats b { color: #e2e8f0; font-weight: 600; }
+      #help { bottom: 12px; left: 12px; }
+      #help kbd {
+        color: #e2e8f0;
+        background: #1e242e;
+        border: 1px solid #333b48;
+        border-radius: 4px;
+        padding: 1px 5px;
+        font: inherit;
+      }
+      #tools { top: 12px; right: 12px; display: flex; gap: 6px; padding: 8px; }
+      #tools button {
+        font: inherit;
+        color: #94a3b8;
+        background: #1a1f28;
+        border: 1px solid #2c333f;
+        border-radius: 5px;
+        padding: 5px 10px;
+        cursor: pointer;
+      }
+      #tools button.active { color: #0b1220; background: #7dd3fc; border-color: #7dd3fc; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+
+    <div class="panel" id="stats">
+      <div>nodes <b id="n-nodes">0</b> &nbsp; edges <b id="n-edges">0</b></div>
+      <div>junctions <b id="n-junctions">0</b> &nbsp; dead ends <b id="n-deadends">0</b></div>
+      <div>network <b id="n-length">0 m</b></div>
+    </div>
+
+    <div class="panel" id="tools">
+      <button data-tool="draw" class="active">Draw</button>
+      <button data-tool="erase">Erase</button>
+    </div>
+
+    <div class="panel" id="help">
+      <div><kbd>drag</kbd> draw a road &nbsp;·&nbsp; <kbd>D</kbd> draw &nbsp;·&nbsp; <kbd>E</kbd> erase</div>
+      <div><kbd>space</kbd>/<kbd>middle</kbd> pan &nbsp;·&nbsp; <kbd>wheel</kbd> zoom &nbsp;·&nbsp; <kbd>G</kbd> debug &nbsp;·&nbsp; <kbd>F</kbd> fit</div>
+      <div><kbd>⌘Z</kbd> undo &nbsp;·&nbsp; <kbd>C</kbd> clear all</div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
