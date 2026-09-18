@@ -34,6 +34,12 @@ export const JUNCTION_RADIUS = 5;
 export const JUNCTION_CLAIM_DIST = 8;
 /** Deceleration assumed when working out how early a vehicle must claim a junction. */
 export const CLAIM_BRAKE = 3.5;
+/**
+ * How close two junction movements may pass before they count as conflicting. Sits between a
+ * vehicle's width and the 2 * LANE_OFFSET separation of opposing lanes, so opposite
+ * straight-throughs still run together while near misses at the node do not.
+ */
+export const MOVEMENT_CLEARANCE = 3;
 export const SPAWN_INTERVAL = 0.5;
 export const MAX_VEHICLES = 300;
 /**

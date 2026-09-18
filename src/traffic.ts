@@ -1,5 +1,6 @@
+import { samplePolyline } from './geom';
 import { type RoadGraph } from './graph';
-import { type Lane, LaneNetwork, type Pose } from './lanes';
+import { type Lane, LaneNetwork, type Movement, type Pose } from './lanes';
 import { Router } from './routing';
 import * as C from './config';
 
@@ -12,8 +13,8 @@ export interface Vehicle {
   s: number;
   v: number;
   desiredSpeed: number;
-  /** Node whose junction box this vehicle has reserved, if any. */
-  holding: number | null;
+  /** The junction movement this vehicle has reserved, if any. */
+  holding: { node: number; key: number } | null;
   spawnedAt: number;
 }
 
@@ -48,8 +49,8 @@ export class TrafficSim {
   vehicles: Vehicle[] = [];
   /** Lane id -> vehicles on it, sorted by increasing s. */
   private byLane = new Map<number, Vehicle[]>();
-  /** Node id -> id of the vehicle currently holding the junction. */
-  readonly junctions = new Map<number, number>();
+  /** Node id -> movement key -> how many vehicles are currently performing it. */
+  readonly active = new Map<number, Map<number, number>>();
   private nextId = 1;
   private spawnTimer = 0;
   running = false;
@@ -62,7 +63,7 @@ export class TrafficSim {
     if (this.network.builtVersion === graph.version) return;
     this.network.build(graph);
     this.router.sync(graph);
-    this.junctions.clear();
+    this.active.clear();
     this.byLane.clear();
     // Drawing a road only rebuilds the edges it touched, so traffic elsewhere carries on.
     // Anything whose remaining route lost a lane is dropped rather than teleported.
@@ -78,7 +79,7 @@ export class TrafficSim {
   reset(): void {
     this.vehicles = [];
     this.byLane.clear();
-    this.junctions.clear();
+    this.active.clear();
     this.arrivals = 0;
     this.tripTimeTotal = 0;
     this.time = 0;
@@ -154,7 +155,7 @@ export class TrafficSim {
 
   /**
    * Distance at which the vehicle must stop for the junction ahead, or null when it may
-   * proceed. Claiming and giving up the claim both happen here.
+   * proceed. Reserving and giving up the reservation both happen here.
    */
   private junctionGap(v: Vehicle, lane: Lane): number | null {
     const next = this.laneAhead(v);
@@ -165,9 +166,9 @@ export class TrafficSim {
     const stopGap = Math.max(0, remaining - C.JUNCTION_RADIUS);
     const insideBox = remaining < C.JUNCTION_RADIUS;
 
-    if (v.holding === node) {
+    if (v.holding && v.holding.node === node) {
       // Once the nose is in the box the vehicle is committed. Before that, it gives the
-      // junction back if the far side filled up during the approach -- holding a box it
+      // movement back if the far side filled up during the approach -- holding a path it
       // cannot clear is what gridlocks the network.
       if (!insideBox && !this.exitHasRoom(next)) {
         this.release(v);
@@ -176,7 +177,10 @@ export class TrafficSim {
       return null;
     }
 
-    // Claim as late as possible so the box is not held for a whole street, but never later
+    const movement = this.network.movementFor(lane.id, next.id);
+    if (!movement) return null;
+
+    // Claim as late as possible so the path is not held for a whole street, but never later
     // than the point where the vehicle could still stop at the line. A fast vehicle therefore
     // claims early and keeps its speed, while a queued one claims late and the junction cycles
     // quickly. Braking itself is planned from any distance, so a vehicle that cannot claim has
@@ -185,12 +189,36 @@ export class TrafficSim {
       C.JUNCTION_CLAIM_DIST,
       C.JUNCTION_RADIUS + (v.v * v.v) / (2 * C.CLAIM_BRAKE),
     );
-    if (remaining <= claimDist && !this.junctions.has(node) && this.exitHasRoom(next)) {
-      this.junctions.set(node, v.id);
-      v.holding = node;
+    if (remaining <= claimDist && this.movementIsClear(movement) && this.exitHasRoom(next)) {
+      this.claim(v, movement);
       return null;
     }
     return stopGap;
+  }
+
+  /**
+   * True when nothing crossing this movement's path is in the junction. Vehicles making the
+   * same movement, or any non-conflicting one, go at the same time: two opposite
+   * straight-throughs never meet, so making them queue for each other throttles the junction
+   * for no reason.
+   */
+  private movementIsClear(movement: Movement): boolean {
+    const atNode = this.active.get(movement.node);
+    if (!atNode) return true;
+    for (const [key, count] of atNode) {
+      if (count > 0 && movement.conflicts.has(key)) return false;
+    }
+    return true;
+  }
+
+  private claim(v: Vehicle, movement: Movement): void {
+    let atNode = this.active.get(movement.node);
+    if (!atNode) {
+      atNode = new Map();
+      this.active.set(movement.node, atNode);
+    }
+    atNode.set(movement.key, (atNode.get(movement.key) ?? 0) + 1);
+    v.holding = { node: movement.node, key: movement.key };
   }
 
   /**
@@ -211,8 +239,14 @@ export class TrafficSim {
   }
 
   private release(v: Vehicle): void {
-    if (v.holding === null) return;
-    if (this.junctions.get(v.holding) === v.id) this.junctions.delete(v.holding);
+    if (!v.holding) return;
+    const atNode = this.active.get(v.holding.node);
+    if (atNode) {
+      const left = (atNode.get(v.holding.key) ?? 0) - 1;
+      if (left > 0) atNode.set(v.holding.key, left);
+      else atNode.delete(v.holding.key);
+      if (atNode.size === 0) this.active.delete(v.holding.node);
+    }
     v.holding = null;
   }
 
@@ -225,7 +259,7 @@ export class TrafficSim {
       while (v.s > lane.length && v.leg < v.route.length - 1) {
         // Hard invariant: never cross a junction without holding it, whatever the car
         // following model did. Without this a fast approach can overshoot the stop line.
-        if (v.holding !== lane.to) {
+        if (!v.holding || v.holding.node !== lane.to) {
           v.s = lane.length;
           v.v = 0;
           break;
@@ -242,7 +276,7 @@ export class TrafficSim {
         continue;
       }
 
-      if (v.holding !== null && lane.from === v.holding && v.s > RELEASE_AT) {
+      if (v.holding && lane.from === v.holding.node && v.s > RELEASE_AT) {
         this.release(v);
       }
       survivors.push(v);
@@ -296,9 +330,30 @@ export class TrafficSim {
     return Math.max(4, Math.min(C.MAX_VEHICLES, Math.round(capacity * C.TARGET_OCCUPANCY)));
   }
 
+  /**
+   * Where the vehicle actually is. Inside a junction it follows the movement curve rather than
+   * the lane, which both removes the jump between lane ends and keeps vehicles on the same
+   * paths that conflict detection was computed from.
+   */
   poseOf(v: Vehicle): Pose | null {
     const lane = this.network.lanes.get(v.route[v.leg]);
-    return lane ? this.network.sample(lane, v.s) : null;
+    if (!lane) return null;
+    const r = C.JUNCTION_RADIUS;
+
+    const next = this.laneAhead(v);
+    const remaining = lane.length - v.s;
+    if (next && remaining < r) {
+      const movement = this.network.movementFor(lane.id, next.id);
+      if (movement) return samplePolyline(movement.path, (r - remaining) / (2 * r));
+    }
+
+    if (v.leg > 0 && v.s < r) {
+      const prev = this.network.lanes.get(v.route[v.leg - 1]);
+      const movement = prev && this.network.movementFor(prev.id, lane.id);
+      if (movement) return samplePolyline(movement.path, 0.5 + v.s / (2 * r));
+    }
+
+    return this.network.sample(lane, v.s);
   }
 
   stats(): TrafficStats {

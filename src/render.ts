@@ -164,7 +164,7 @@ function drawVehicles(ctx: CanvasRenderingContext2D, sim: TrafficSim): void {
 function drawBusyJunctions(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGraph, sim: TrafficSim): void {
   ctx.strokeStyle = COLORS.junctionBusy;
   ctx.lineWidth = 1.2 / cam.zoom;
-  for (const nodeId of sim.junctions.keys()) {
+  for (const nodeId of sim.active.keys()) {
     const node = graph.nodes.get(nodeId);
     if (!node) continue;
     ctx.beginPath();

@@ -24,8 +24,9 @@ zoning/economy. Roads are one lane per direction.
 - **World units are metres.** Camera zoom is screen pixels per metre.
 - **Traffic enters and leaves at dead ends.** Every degree-1 node is both a source and a sink, so
   traffic appears as soon as a road is drawn, with no extra tool or UI.
-- **Junctions are all-way stops via an occupancy claim**, chosen over priority/yield rules for v0
-  because it is deadlock-free to reason about and still produces real congestion.
+- **Junctions reserve a movement, not the whole box.** Started as an all-way stop (one vehicle at
+  a time) and was upgraded to conflict points: two movements run together unless their paths
+  actually come close. Measured at 1.55x the crossings per minute of the all-way-stop version.
 
 ## Invariants the graph relies on
 
@@ -60,7 +61,10 @@ any change to junction or car-following logic, because both failed at some point
 implementation and neither is visible at a glance:
 
 - no two vehicles on one lane overlap (`leader.s - CAR_LENGTH - follower.s >= 0`);
-- no two vehicles from different edges sit inside the same junction box.
+- the closest approach between any two vehicles stays at `2 * LANE_OFFSET`. This replaced an
+  earlier "one vehicle per junction box" check, which conflict points make meaningless — vehicles
+  are now *supposed* to share a junction. Minimum pairwise distance is the test that still means
+  something, and it is what caught the conflict/reality mismatch above.
 
 When measuring flow, watch whether **arrivals keep rising**. Falling average speed alone does not
 distinguish congestion from deadlock, but a network whose arrival count has stopped moving is
@@ -96,14 +100,29 @@ getting any one wrong produces a network that gridlocks or cheats:
 That hard invariant is what makes junction exclusion true regardless of what the car-following
 model does, and should not be removed.
 
-### Capacity, and why demand is scaled down
+### Conflict points
 
-A junction is held for about 3 seconds per vehicle, capping it near **20 vehicles per minute** —
-the genuine capacity of an all-way stop, not a bug. Demand is therefore scaled by
-`TARGET_OCCUPANCY` to a small fraction of what the tarmac would physically hold; sizing demand to
-road length instead saturates every junction and the whole network crawls. If junction throughput
-ever needs to rise, the real fix is letting **non-conflicting movements cross together** (opposite
-straight-throughs, right turns) rather than one vehicle at a time.
+A *movement* is one way through a junction (arrive on this lane, leave on that one). Two movements
+conflict when their paths come within `MOVEMENT_CLEARANCE`, or when they merge into the same exit
+lane. Everything else runs simultaneously, so opposite straight-throughs no longer queue for each
+other. About 44% of cross-approach movement pairs at a four-way are compatible.
+
+Two things make this work, and both were found by measurement rather than reasoning:
+
+- **Sample movement paths a junction radius back from the node, not at it.** Every lane ends
+  exactly at the node, so measured there a junction has no extent and no two paths ever cross.
+- **Vehicles must drive the same curve the conflict test used.** The first version compared
+  straight chords between lane ends while vehicles drove to the node and jumped to the next lane.
+  The test and reality disagreed, and vehicles on supposedly compatible movements passed within
+  2m. Movement paths are now quadratic beziers whose control point is where the two lane tangents
+  meet (the natural corner of the turn, which keeps the curve off the node), and `poseOf` places
+  vehicles along that same curve while crossing. Closest approach then measured exactly
+  `2 * LANE_OFFSET`, the geometric minimum, and the lane-end jump at turns disappeared as a side
+  effect.
+
+A junction still holds a movement for about 3 seconds per vehicle, so demand is scaled by
+`TARGET_OCCUPANCY` well below what the tarmac would physically hold. Sizing demand to road length
+instead saturates every junction and the network crawls.
 
 Routing is static shortest-distance, so all traffic funnels onto the same path and hotspots are
 sharper than in reality. That is arguably the right behaviour for a game about spotting

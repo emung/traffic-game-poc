@@ -94,3 +94,60 @@ export function splitPolyline(pts: Vec2[], segIdx: number, t: number): [Vec2[], 
     [clone(p), ...pts.slice(segIdx + 1).map(clone)],
   ];
 }
+
+/** Smallest distance between two segments; zero when they cross. */
+export function segmentDistance(a1: Vec2, a2: Vec2, b1: Vec2, b2: Vec2): number {
+  if (segmentIntersect(a1, a2, b1, b2)) return 0;
+  return Math.min(
+    closestOnSegment(a1, b1, b2).dist,
+    closestOnSegment(a2, b1, b2).dist,
+    closestOnSegment(b1, a1, a2).dist,
+    closestOnSegment(b2, a1, a2).dist,
+  );
+}
+
+/** Intersection of two infinite lines given as point + direction, or null when near-parallel. */
+export function lineIntersection(p1: Vec2, d1: Vec2, p2: Vec2, d2: Vec2): Vec2 | null {
+  const denom = cross(d1, d2);
+  if (Math.abs(denom) < 1e-6) return null;
+  const t = cross(sub(p2, p1), d2) / denom;
+  return add(p1, scale(d1, t));
+}
+
+export function quadraticBezier(a: Vec2, control: Vec2, b: Vec2, samples: number): Vec2[] {
+  const out: Vec2[] = [];
+  for (let i = 0; i <= samples; i++) {
+    const t = i / samples;
+    const u = 1 - t;
+    out.push({
+      x: u * u * a.x + 2 * u * t * control.x + t * t * b.x,
+      y: u * u * a.y + 2 * u * t * control.y + t * t * b.y,
+    });
+  }
+  return out;
+}
+
+/** Smallest distance between two polylines. */
+export function polylineDistance(a: Vec2[], b: Vec2[]): number {
+  let best = Infinity;
+  for (let i = 0; i < a.length - 1; i++) {
+    for (let j = 0; j < b.length - 1; j++) {
+      best = Math.min(best, segmentDistance(a[i], a[i + 1], b[j], b[j + 1]));
+      if (best === 0) return 0;
+    }
+  }
+  return best;
+}
+
+/** Position and tangent at arc-length fraction `t` along a polyline. */
+export function samplePolyline(pts: Vec2[], t: number): { pos: Vec2; dir: Vec2 } {
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
+  const total = cum[cum.length - 1];
+  const target = Math.max(0, Math.min(1, t)) * total;
+  let i = 0;
+  while (i < cum.length - 2 && cum[i + 1] < target) i++;
+  const segLen = cum[i + 1] - cum[i];
+  const f = segLen < 1e-9 ? 0 : (target - cum[i]) / segLen;
+  return { pos: lerp(pts[i], pts[i + 1], f), dir: normalize(sub(pts[i + 1], pts[i])) };
+}
