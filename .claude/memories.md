@@ -12,6 +12,12 @@ just the area touched. When a change adds real behavior, add a test for it in th
 an existing test redundant or obsolete (the behavior it checked no longer exists, or it's fully
 subsumed by a newer test), remove it rather than leaving it to rot.
 
+When a milestone is completed, move it out of "Candidate milestones" and into the numbered done
+list at the top of "Scope and roadmap" (keep its number, mark it `(done)`, add a one-line summary
+and a pointer to the section that documents it), and update the "N–M are done" line and any
+theme ranges in the candidate intro. The owner asked for this on 2026-09-18 after milestone 7
+was left sitting in the candidate list.
+
 ## Scope and roadmap
 
 Milestones are built one at a time. 1–7 are done; 8–17 are candidates.
@@ -27,22 +33,21 @@ Milestones are built one at a time. 1–7 are done; 8–17 are candidates.
    smoke tests for `geom.ts`/`simplify.ts`/`camera.ts`. See "Automated tests" below.
 6. **Congestion-aware routing** (done) — new trips are routed on per-lane travel time from the
    congestion heat, reweighed every 5 s with damping. See "Congestion-aware routing" below.
+7. **Junction tools** (done) — signals, priority roads and roundabouts, placed with the Control
+   tool (`T`); plain junctions are deliberately slow so controls are upgrades. See "Junction
+   controls" below.
 
 v0 deliberately left out multiple road types, one-ways, traffic lights, zoning and any economy,
-and roads are one lane per direction. Road types, junction tools and a budget are now candidates;
-zoning is not.
+and roads are one lane per direction. Road types and a budget are now candidates; zoning is not.
 
 ### Candidate milestones
 
 None of 8–17 is started. Each begins only when picked, with its design questions settled then.
 Road budget (9) is the natural next step: priority roads currently cost nothing and dominate
 the other controls (see "Junction controls"). The list
-is grouped by theme, not ranked: problems the simulation exposed (7–8), costs and goals (9–11),
+is grouped by theme, not ranked: problems the simulation exposed (8), costs and goals (9–11),
 feedback (12–14) and quality of life (15–17).
 
-7. **Junction tools** (done) — signals, priority roads and roundabouts, placed with the Control
-   tool (`T`); plain junctions are deliberately slow so controls are upgrades. See "Junction
-   controls" below.
 8. **Bridges** — every crossing becomes a junction. A modifier key while drawing would carry a
    road over the others with no node, so no conflict points. `addStroke` splits at every crossing
    and rendering has no layers, so both need changing; the simulation only interacts at nodes and
