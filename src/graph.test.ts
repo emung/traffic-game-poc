@@ -175,3 +175,87 @@ describe('RoadGraph', () => {
     }
   });
 });
+
+describe('junction control', () => {
+  function crossing(): { graph: RoadGraph; centreId: number; endId: number } {
+    const graph = new RoadGraph();
+    graph.addStroke([
+      { x: 0, y: 50 },
+      { x: 100, y: 50 },
+    ]);
+    graph.addStroke([
+      { x: 50, y: 0 },
+      { x: 50, y: 100 },
+    ]);
+    const nodes = [...graph.nodes.values()];
+    return {
+      graph,
+      centreId: nodes.find((n) => n.edges.length === 4)!.id,
+      endId: nodes.find((n) => n.edges.length === 1)!.id,
+    };
+  }
+
+  it('sets and clears a control, bumping the version so the lane network rebuilds', () => {
+    const { graph, centreId } = crossing();
+    const before = graph.version;
+
+    expect(graph.setControl(centreId, 'signal')).toBe(true);
+    expect(graph.nodes.get(centreId)!.control).toBe('signal');
+    expect(graph.version).toBeGreaterThan(before);
+
+    expect(graph.setControl(centreId, null)).toBe(true);
+    expect(graph.nodes.get(centreId)!.control).toBeUndefined();
+  });
+
+  it('refuses a control on a dead end or an unknown node', () => {
+    const { graph, endId } = crossing();
+    const before = graph.version;
+
+    expect(graph.setControl(endId, 'roundabout')).toBe(false);
+    expect(graph.setControl(9999, 'signal')).toBe(false);
+    expect(graph.nodes.get(endId)!.control).toBeUndefined();
+    expect(graph.version).toBe(before);
+  });
+
+  it('survives a save/load round trip, and a save from before controls loads as plain', () => {
+    const { graph, centreId } = crossing();
+    graph.setControl(centreId, 'priority');
+
+    const reloaded = new RoadGraph();
+    reloaded.loadJSON(graph.toJSON());
+    expect(reloaded.nodes.get(centreId)!.control).toBe('priority');
+
+    const old = JSON.parse(graph.toJSON());
+    delete old.format;
+    for (const n of old.nodes) delete n.control;
+    const legacy = new RoadGraph();
+    legacy.loadJSON(JSON.stringify(old));
+    expect(legacy.nodes.get(centreId)!.control).toBeUndefined();
+  });
+
+  it('keeps the control when a new road welds onto the junction', () => {
+    const { graph, centreId } = crossing();
+    graph.setControl(centreId, 'roundabout');
+
+    // Ends on the centre node, so it welds to it instead of creating a new one.
+    graph.addStroke([
+      { x: 50, y: 50 },
+      { x: 90, y: 90 },
+    ]);
+    expect(graph.nodes.get(centreId)!.control).toBe('roundabout');
+  });
+
+  it('starts a node created by splitting a road plain', () => {
+    const { graph, centreId } = crossing();
+    graph.setControl(centreId, 'signal');
+    const known = new Set(graph.nodes.keys());
+
+    graph.addStroke([
+      { x: 20, y: 0 },
+      { x: 20, y: 100 },
+    ]);
+    const created = [...graph.nodes.values()].filter((n) => !known.has(n.id));
+    expect(created.length).toBeGreaterThan(0);
+    for (const n of created) expect(n.control).toBeUndefined();
+  });
+});

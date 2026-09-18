@@ -12,9 +12,24 @@ import {
 import { simplify, smooth, nudgeEndpoint } from './simplify';
 import { MERGE_DIST, MIN_ROAD_LENGTH, SIMPLIFY_EPS, SMOOTH_PASSES, SNAP_RADIUS } from './config';
 
+export type JunctionControl = 'signal' | 'priority' | 'roundabout';
+
+export const JUNCTION_CONTROLS: readonly JunctionControl[] = ['signal', 'priority', 'roundabout'];
+
+/** Bumped when the saved shape changes; a save without one predates junction controls. */
+const FORMAT_VERSION = 2;
+
 export interface RoadNode {
   id: number;
   pos: Vec2;
+  /** Absent means a plain junction. Only meaningful at degree 3+; lower degrees ignore it. */
+  control?: JunctionControl;
+  /**
+   * Priority junctions only: arrival bearing (radians) of one approach of the road the player made
+   * major. Stored as a direction, not an edge id, because edge ids change whenever a road is split
+   * while the bearing at this junction does not. Absent means "use the default rule".
+   */
+  majorBearing?: number;
   /** Incident edge ids. A self-loop appears twice: it meets the node at both ends. */
   edges: number[];
 }
@@ -107,6 +122,31 @@ export class RoadGraph {
         this.version++;
       }
     }
+  }
+
+  /** Sets or clears a node's junction control. Returns false if the node cannot take one. */
+  setControl(id: number, control: JunctionControl | null): boolean {
+    const node = this.nodes.get(id);
+    if (!node) return false;
+    if (control) {
+      if (node.edges.length < 3) return false;
+      node.control = control;
+    } else {
+      delete node.control;
+    }
+    if (control !== 'priority') delete node.majorBearing;
+    this.version++;
+    return true;
+  }
+
+  /** Records which road the player chose as major at a priority junction; null returns to the default rule. */
+  setMajorBearing(id: number, bearing: number | null): boolean {
+    const node = this.nodes.get(id);
+    if (!node || node.control !== 'priority') return false;
+    if (bearing === null) delete node.majorBearing;
+    else node.majorBearing = bearing;
+    this.version++;
+    return true;
   }
 
   nodeNear(pos: Vec2, radius: number): RoadNode | null {
@@ -262,9 +302,15 @@ export class RoadGraph {
 
   toJSON(): string {
     return JSON.stringify({
+      format: FORMAT_VERSION,
       nextNode: this.nextNode,
       nextEdge: this.nextEdge,
-      nodes: [...this.nodes.values()].map((n) => ({ id: n.id, pos: n.pos })),
+      nodes: [...this.nodes.values()].map((n) => ({
+        id: n.id,
+        pos: n.pos,
+        control: n.control,
+        majorBearing: n.majorBearing,
+      })),
       edges: [...this.edges.values()].map((e) => ({ id: e.id, a: e.a, b: e.b, points: e.points })),
     });
   }
@@ -273,7 +319,7 @@ export class RoadGraph {
     const data = JSON.parse(raw) as {
       nextNode: number;
       nextEdge: number;
-      nodes: Array<{ id: number; pos: Vec2 }>;
+      nodes: Array<{ id: number; pos: Vec2; control?: JunctionControl; majorBearing?: number }>;
       edges: Array<{ id: number; a: number; b: number; points: Vec2[] }>;
     };
     this.clear();
@@ -281,7 +327,12 @@ export class RoadGraph {
     // by id, so an id that came back meaning a different road would teleport vehicles onto it.
     this.nextNode = Math.max(this.nextNode, data.nextNode);
     this.nextEdge = Math.max(this.nextEdge, data.nextEdge);
-    for (const n of data.nodes) this.nodes.set(n.id, { id: n.id, pos: n.pos, edges: [] });
+    for (const n of data.nodes) {
+      const node: RoadNode = { id: n.id, pos: n.pos, edges: [] };
+      if (n.control && JUNCTION_CONTROLS.includes(n.control)) node.control = n.control;
+      if (node.control === 'priority' && typeof n.majorBearing === 'number') node.majorBearing = n.majorBearing;
+      this.nodes.set(n.id, node);
+    }
     for (const e of data.edges) {
       this.edges.set(e.id, { id: e.id, a: e.a, b: e.b, points: e.points });
       this.nodes.get(e.a)!.edges.push(e.id);

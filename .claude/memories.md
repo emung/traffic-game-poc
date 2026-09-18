@@ -14,14 +14,14 @@ subsumed by a newer test), remove it rather than leaving it to rot.
 
 ## Scope and roadmap
 
-Milestones are built one at a time. 1–6 are done; 7–17 are candidates.
+Milestones are built one at a time. 1–7 are done; 8–17 are candidates.
 
 1. **Drawing -> road graph** (done) — freehand strokes become a clean node/edge graph.
 2. **Traffic simulation** (done) — dead-end spawners, Dijkstra routing, IDM car-following,
    occupancy-claim junctions.
-3. **Feedback loop** (done) — jam heatmap, flow and delay charts, demand that ramps in waves.
-4. **Minimal UI** (done) — toolbar, 1x/2x/4x speed, time frozen while drawing, wave
-   countdown, best-wave record.
+3. **Feedback loop** (done) — jam heatmap, flow and delay charts. Demand ramped in waves until
+   2026-09-18; see "Waves were removed" below.
+4. **Minimal UI** (done) — toolbar, 1x/2x/4x speed, time frozen while drawing.
 5. **Automated tests** (done) — Vitest suite (`npm test`) covering the graph topology cases and
    the two simulation invariants from "Verifying changes here", plus `routing.ts` correctness and
    smoke tests for `geom.ts`/`simplify.ts`/`camera.ts`. See "Automated tests" below.
@@ -34,23 +34,24 @@ zoning is not.
 
 ### Candidate milestones
 
-None of 7–17 is started. Each begins only when picked, with its design questions settled then.
-Junction tools (7) is the suggested next step, since junctions are the capacity limit. The list
+None of 8–17 is started. Each begins only when picked, with its design questions settled then.
+Road budget (9) is the natural next step: priority roads currently cost nothing and dominate
+the other controls (see "Junction controls"). The list
 is grouped by theme, not ranked: problems the simulation exposed (7–8), costs and goals (9–11),
 feedback (12–14) and quality of life (15–17).
 
-7. **Junction tools** — junctions are the capacity limit, about 3 s per vehicle, and drawing more
-   road is the only fix today. Candidates: traffic lights, priority roads, roundabouts. Which of
-   them, and how the player places one, is the first decision.
+7. **Junction tools** (done) — signals, priority roads and roundabouts, placed with the Control
+   tool (`T`); plain junctions are deliberately slow so controls are upgrades. See "Junction
+   controls" below.
 8. **Bridges** — every crossing becomes a junction. A modifier key while drawing would carry a
    road over the others with no node, so no conflict points. `addStroke` splits at every crossing
    and rendering has no layers, so both need changing; the simulation only interacts at nodes and
    should need no change.
 9. **Road budget** — nothing stops the player paving everything. Charge per metre, more for
    bridges, so every stroke is a trade-off. Open: refunds on erase and undo, and how the budget
-   grows between waves.
+   grows over time (there are no waves any more).
 10. **Fixed entrances or designed levels** — every dead end is an entrance, so the player decides
-    where traffic comes from. The request rate depends only on the wave and origins are uniform
+    where traffic comes from. The request rate is a constant and origins are uniform
     over dead ends, so each extra stub thins the load on every entrance; whether that wins is
     untested. Worse, `requestTrip` drops a trip whose ends are not connected, so a few isolated
     roads should make much of the demand vanish, reopening the hole that "Unserved demand has to
@@ -224,7 +225,7 @@ Two things make this work, and both were found by measurement rather than reason
 
 A junction still holds a movement for about 3 seconds per vehicle, which is the real capacity
 limit of a network. Early versions sized demand to road length and saturated every junction;
-demand is now a rate that ramps in waves (see the feedback loop section).
+demand is now a constant request rate (see the feedback loop section).
 
 ### Congestion-aware routing
 
@@ -254,8 +255,7 @@ a lane actually queues, so a network whose bottleneck is a shared junction sees 
 
 ## Feedback loop
 
-Demand rises in waves (`WAVE_SECONDS`), driving a trip *request rate* rather than a population
-target. Requests queue at their entrance until there is room to get in (see "Unserved demand"
+Demand is a constant trip *request rate* (`SPAWN_RATE`), not a population target. Requests queue at their entrance until there is room to get in (see "Unserved demand"
 below). Three things tell the player how the network is doing: a congestion overlay on the
 lanes, a rolling flow figure, and a delay ratio, the last two also drawn as sparklines.
 
@@ -289,14 +289,13 @@ a banner; `R` clears it and restarts traffic.
 ### Unserved demand has to count
 
 Originally a spawn attempt that found its entrance full was simply dropped. Measured consequence:
-a single straight road carried wave-14 demand at 38 km/h with a delay of 1.13 and could never
+a single straight road carried what was then wave-14 demand at 38 km/h with a delay of 1.13 and could never
 fail, so building *fewer* junctions was the winning strategy and a best-wave record would only
-have measured how long the tab was open. Trips now wait in a queue per entrance and their clock
+have measured how long the tab was open (the record and the waves are gone now). Trips now wait in a queue per entrance and their clock
 starts at the request, so time spent outside counts as delay; the same single road now fails as
 its entrances back up. Badges at dead ends show each queue.
 
-Two related guards: the wave clock only runs while there is traffic or a queue, so an empty or
-unconnected map cannot bank waves; and admitted vehicles enter no faster than the car ahead and
+One related guard: admitted vehicles enter no faster than the car ahead and
 slowly enough to stop behind it. Entering at road speed was a latent milestone-3 bug that the
 queue exposed — with a queue every admission happens at the minimum gap, right behind a stopped
 car, and 8 vehicles overlapped on entrance lanes until it was fixed.
@@ -308,6 +307,161 @@ runs and `sim.time` crawls. Measurements taken then look like the simulation is 
 `window.sim` is a stale object. Bring the pane to the front before timing anything. Separately,
 Vite's HMR replaces `window.sim` on every edit, so a long-running console script should re-read
 `window.sim` each iteration rather than capturing it once.
+
+### Waves were removed
+
+The owner removed the wave mechanism on 2026-09-18 ("I don't want a constantly rising car
+amount"): the demand ramp, wave clock, wave counter and countdown, best-wave record and its
+`traffic-game/best-wave` localStorage key (left orphaned, harmless). Demand is now the constant
+`SPAWN_RATE` (1.1 trips/s, the old wave 1). Failure is unchanged: a sustained delay ratio above
+`FAIL_DELAY_RATIO`; the banner now reports how many seconds the run lasted. The code lives in git
+history. Anything measured "by wave" earlier in this file is historical.
+
+## Junction controls (milestone 7, done)
+
+Decided with the owner: all three types (signal, priority, roundabout); placed with a Control
+tool (`T`) that cycles none -> signal -> priority -> roundabout -> none on a junction of degree 3+;
+signals use a fixed cycle. Plan file: `~/.claude/plans/start-with-the-planning-polished-feather.md`.
+
+- **Phase 1 (done): plumbing.** `RoadNode.control`, `RoadGraph.setControl` (bumps `version`,
+  refuses degree < 3), persisted in `toJSON`/`loadJSON` with a save `format` version (2), so undo
+  and localStorage cover it. `LaneNetwork.controls` holds only effective controls (degree >= 3).
+  Shared test fixture `buildGrid(control)` lives in `src/testutil.ts`, and the traffic invariant
+  tests run once per control type (`CONTROLS` in `traffic.test.ts`).
+- **Phase 2 (done): signals.** `LaneNetwork.phases` groups a signal's approaches into phases:
+  approaches arriving from opposite directions (dot < -0.7) share a phase, chosen by how many
+  movements can run together; a T's stem gets its own. Lefts stay permissive (the claim-time
+  conflict check makes them wait for a gap). `TrafficSim.signalState` is a pure function of
+  `sim.time` and node id (no timer state): green 8 s, yellow 2 s, all-red 1 s. Red withholds the
+  claim; yellow lets in only vehicles already inside `claimDist` (they cannot stop comfortably).
+- **Phase 3 (done): priority roads.** `LaneNetwork.buildPriority` picks the major road at each
+  priority node: the two approaches closest to a straight line (at a T, the through road; at an X
+  the first such pair by angle). Minor-approach movements get `Movement.yieldsTo` = the major
+  movements they conflict with. `TrafficSim.majorIsClear` (part of the claim predicate) makes a
+  minor car wait while a conflicting major car is within `YIELD_LOOKAHEAD` (40 m) and would arrive
+  within `YIELD_TIME` (3 s) at its current speed; a major car creeping from rest does not count.
+  Major roads never yield, so no yield cycle at a node. Rendered as dashed give-way lines at
+  minor stop lines. Tests: `lanes.test.ts` (new) and "priority" in `traffic.test.ts`; the yield
+  test was mutation-checked (fails with yielding disabled).
+- **Priority bug found in the browser (fixed): a standing major-road queue lost to the minor
+  road.** The first `majorIsClear` only counted major cars that were moving, so cars waiting at the
+  line (v = 0) were ignored, and minor cars kept claiming the junction while the major queue stood
+  (seen live: minor car holding at 11 m/s, major queues at r = 7 m). Now a major car within
+  `YIELD_QUEUE_DIST` (12 m) of the line counts whether moving or not, unless its own exit is full
+  (`exitHasRoom`; minor traffic cannot clear that). Test: "gives a major-road car standing at the
+  line its turn" (mutation-checked). Live check afterwards: 0 minor claims while a major car stood
+  at the line over 40 simulated seconds. Lesson: unit tests with a moving major car passed while
+  this was broken; standing queues need their own test.
+- **Phase 4 (done): roundabouts.** A roundabout has a bigger box than a plain junction
+  (`ROUNDABOUT_ZONE` 12 m, shrunk to 45% of its shortest road, never below 5 m; ring radius
+  `ROUNDABOUT_RING_FRACTION` 0.6 of that = 7.2 m) and a limit of `ROUNDABOUT_SPEED` 8 m/s.
+  `LaneNetwork.ringPath` builds each movement as lane -> ring -> anticlockwise arc (decreasing
+  angle, since screen y points down) -> exit lane, Chaikin-smoothed. Rendered as a ring road with an
+  island. U-turns (same edge) keep a plain chord and the static conflict rule.
+  - **Per-node zone and per-movement span (applies to every junction, no behaviour change for
+    plain).** `Movement.zone` is the node's box radius; `Movement.span` is how far a vehicle
+    travels through the box: `2 * zone` for plain (sampled by fraction, as before), the true path
+    length for a roundabout. On changing lane `advanceLegs` subtracts `span - 2 * zone`, so a car's
+    real position along its path stays continuous; the price is that a vehicle in the box can have
+    a *negative* `s` on the exit lane (a virtual coordinate), and `computeAccelerations` adds the
+    same shift to the gap to a leader on the next lane. Without it cars sped up on long arcs and
+    overlapped on short right turns; the roundabout crossing tests fail if the shift is removed.
+  - **Entering is judged by where cars are on the ring, not by static arc conflicts** (`ringIsClear`).
+    Static conflicts made the whole ring one exclusive box: roundabouts failed even at light
+    demand (8/8 trials at 1.1/s). Now an entrant yields to a ring car that will reach its entry
+    within `ROUNDABOUT_YIELD_ARC` (14 m) plus `ROUNDABOUT_YIELD_TIME` (2 s) of that car's speed,
+    and stays `ROUNDABOUT_FOLLOW_ARC` (8 m) plus `ROUNDABOUT_ENTRY_LAG` (4 per metre the leader
+    still has to travel before reaching the ring) behind one that has just passed its entry.
+    Same-approach cars are left to car following; movements into the same exit lane take turns
+    (a vehicle cannot see a car still on the ring, whose exit-lane position is only virtual).
+  - **Bugs found on the way, all fixed and all generic:** (1) the speed limit did not apply in the
+    second half of the box, so cars accelerated to 14 m/s halfway round; `junctionSpeedCap` now
+    holds the limit until the car has left the box (this also slows plain junctions on exit).
+    (2) A car that claimed early and then found the exit full released at speed a few metres out
+    and rolled into the box unclaimed; it may now only release if it can still stop
+    (`canStop` in `junctionGap`). (3) A claimant that had not reached the ring yet was treated as
+    already on it, so a faster ring car caught up with it; the entry-lag term fixes that.
+  - **How it was verified.** Closest approach >= `MOVEMENT_CLEARANCE` and no lane overlap over 80
+    trials of 90 s for plain, signal and priority: 0 violations. Roundabout: 26% of trials
+    violated before the fixes; after them 1 in 1,500 trials (a 2.95 m scrape); after raising
+    `ROUNDABOUT_ENTRY_LAG` from 2.5 to 4, 0 in 1,500. A residual rate is possible; if
+    `keeps every pair of vehicles at least MOVEMENT_CLEARANCE apart (control: roundabout)` ever
+    flakes, that is this, not a random failure. Method: run the sim in a loop with
+    `buildGrid('roundabout')` and dump both vehicles' lane, s, v, ring angle and holding movement
+    at the first violation; every cause found so far was visible in that dump.
+  - **Comparison on the 2x2 grid** (8 trials, 300 s, `MAX_ACCEL` 32; arrivals; delay at light
+    demand): 1.1/s (nobody fails): plain 243 / 2.11x, signal 270 / 1.83x, priority 296 / 1.28x,
+    roundabout 266 / 1.88x. 2.5/s (all fail): plain 117, signal 161, priority 178, roundabout 153.
+    4/s: plain 98, signal 133, priority 126, roundabout 122. Every control now beats plain.
+    Priority still dominates (it costs nothing; see milestone 9). Roundabout sits between plain
+    and signal; a small ring with static conflicts was strictly worse than plain, so do not
+    simplify `ringIsClear` back to conflict sets.
+  - **Known limits.** Roads shorter than about 27 m shrink the roundabout box (45% rule). Two
+    roundabouts on one short road are not otherwise handled. No visual cue shows circulation
+    direction.
+- **Which road is major (owner decision, 2026-09-18: rule plus Shift-click).** Ties are the normal
+  case at a four-way (both axes dead straight). `LaneNetwork.priorityAxes` ranks candidate pairs by
+  straightness (scores within `AXIS_TIE` 0.05 are tied), then by total road length, then by arrival
+  angle, so by default the longer road is major. Shift-click on a priority junction with the
+  Control tool rotates through the candidates (`nextMajorBearing`); a T has one candidate so it
+  does nothing there. The choice is stored on the node as `RoadNode.majorBearing`, the arrival
+  bearing of one major approach, not an edge id: edge ids change whenever a road is split, the
+  bearing at the junction does not. Matched to an approach within `BEARING_MATCH` (0.35 rad),
+  otherwise the default rule applies. `setControl` clears it (any control change), and it is
+  saved in `toJSON`/`loadJSON`. Tests: "choosing the major road" in `lanes.test.ts` (mutation-
+  checked). Trap hit while building it: inserting an `if` between an `if` and its `else if` in
+  `LaneNetwork.build` silently made every controlled junction also count as plain (and slowed
+  them); the approach tests caught it.
+- **Plain junctions are slow on purpose (owner decision, 2026-09-18).** Before this, no control beat
+  a plain junction: it is a zero-cost reservation scheme (cars claim non-conflicting paths and cross
+  at full speed), so every control only added waiting and a player had no reason to place one. Now
+  a plain junction (three or more roads, no control; `LaneNetwork.plainJunctions`) caps vehicles at
+  `UNCONTROLLED_SPEED` (5.5 m/s, 20 km/h). `TrafficSim.plainJunctionCap` is an acceleration cap in
+  `computeAccelerations`: braking starts at a comfortable deceleration only once the car could not
+  otherwise reach the limit by the box edge (~37 m out from 50 km/h), then holds the limit while
+  crossing. Signals, priority and roundabout nodes are not slowed. Tests: "approaching an open
+  junction" in `traffic.test.ts`.
+- **Comparison on the 2x2 grid after the slowdown** (8 trials, 300 s, `MAX_ACCEL` 32). Light demand
+  (1.1/s, nobody fails): delay plain 1.75x, signal 1.82x, priority 1.26x. At 2.5/s (all fail):
+  arrivals plain 150, signal 184, priority 214. At 4/s: 114, 141, 133. So both controls now win
+  under load, and priority beats plain even when light. Priority dominates signals here because it
+  costs nothing: with no budget (milestone 9) there is no reason to pick a signal. Revisit when
+  controls get a price or when signals get smarter. Before the slowdown plain won everywhere
+  (2.5/s: plain 262, priority 202, signal 167).
+- **Approach braking bug (fixed, applies to plain junctions too).** `junctionGap` used to return a
+  stop-line obstacle for any vehicle that could not claim yet, even one far out that would be
+  cleared the moment it got closer, so cars braked for open junctions from ~60 m and reached a
+  green crawling. Now a vehicle beyond `claimDist` whose junction is open returns no obstacle;
+  `claimDist` is the stopping distance at `CLAIM_BRAKE`, so it can still stop if the junction
+  closes. Measured (12 trials, 2x2 grid, arrivals before failure): plain 88 -> ~120, signal
+  54 -> ~78. Older throughput numbers in this file predate the fix. Tests: "approaching an open
+  junction" in `traffic.test.ts` (a car must hold > 95% of desired speed).
+- **Queue discharge was throttled by `exitHasRoom` (fixed, applies to every junction).** A trace
+  of 6 queued cars at a green showed each follower waiting for its leader to be ~17 m into the exit
+  lane (`RELEASE_AT + CAR_LENGTH + MIN_GAP + 1`) and braking meanwhile: one car per ~2.2 s even
+  though the leader was at full speed. Now a flowing car counts by its projected position
+  (`EXIT_LOOKAHEAD`, 1 s) when it moves at >= `EXIT_FLOW_SPEED_FRACTION` (0.5) of desired speed
+  and everything in the first `EXIT_FLOW_CHECK_LENGTH` (60 m) of the exit lane is flowing too, so a
+  queue forming just past the junction still keeps followers out of the box. Result at
+  `MAX_ACCEL` 32: 4 -> 5 cars per green+yellow, headway 2.2 -> ~1.7 s. At the default 1.8 it
+  barely helps (a leader accelerating from rest is below the speed fraction for seconds), and only
+  2 of 8 queued cars cross in 10 s. Tests: "exit room" in `traffic.test.ts`.
+- **Signal green is 15 s** (was 8). A queue discharges ~1.9 s per car, so 8 s of green passed only
+  ~4-5 cars. Swept 8/12/16/20/25 s at `MAX_ACCEL` 32 on the 2x2 grid: longer green passes more per
+  phase but raises delay under light traffic (signal delay 1.67x at 8 s -> 1.90x at 16 s -> 2.22x
+  at 25 s, vs ~1.2x plain), so 15 s is the low end of the useful range. Signals only pay off where
+  plain junctions are near capacity, which constant demand at this rate does not reach.
+  Beware when tracing with an artificial queue: 8+ stopped cars trip the gridlock detector after
+  ~20 s and pause the sim, which looks like a discharge plateau.
+- **With constant demand and `MAX_ACCEL` 32** the 2x2 grid never fails in 600 s (plain 628
+  arrivals, signal 608, 0/12 failed); at 1.8 all 12 trials fail (plain 178 arrivals, survived
+  257 s; signal 86, 182 s).
+- **Signals still trail plain junctions** on that grid, since plain conflict-point junctions
+  already run compatible movements together. Open: whether signals win on a heavier junction.
+  Green is short (8 s), which with ~2 s discharge headway passes only a few cars per phase.
+- **Launch feel.** `MAX_ACCEL` is 1.8 m/s^2, so a car from rest takes ~4 s to clear the box. A
+  temporary 2.6 raised arrivals (plain ~119 -> 153, signal ~77 -> 97) with all invariants green.
+  The owner has tried a much larger value locally (32) and still saw only 2-3 cars pass per green.
 
 ## Minimal UI
 
@@ -322,7 +476,7 @@ Details that were deliberate:
 - **While a stroke is being drawn the accumulator is zeroed**, so the paused time is dropped rather
   than replayed as a burst on release.
 - **Undo rewinds the roads, not the run.** It used to call `sim.reset()`, which sent a player who
-  undid a stroke in wave 5 back to wave 1. Graph ids are now monotonic (`clear` and `loadJSON`
+  undid a stroke late in a run back to the start. Graph ids are now monotonic (`clear` and `loadJSON`
   never move the counters backwards), so an id can never come back meaning a different road and
   vehicles on surviving roads are safe to keep.
 - **Keyboard shortcuts ignore Cmd/Ctrl/Alt.** Before this, copying with Cmd+C cleared the map.
@@ -332,7 +486,6 @@ Details that were deliberate:
   drops the stats-panel margin on narrow screens.
 - Centred fixed elements use `left/right` insets with auto margins. `left: 50%` plus a translate
   only gives them the right half of the viewport to size into, and the toolbar wrapped at 400px.
-- The best wave is stored under `traffic-game/best-wave` and only advances while there is traffic.
 
 ### Driving the simulation in tests
 

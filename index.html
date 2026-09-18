@@ -10,6 +10,7 @@
       canvas#c { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: crosshair; }
       canvas#c.panning { cursor: grabbing; }
       canvas#c.erasing { cursor: cell; }
+      canvas#c.controlling { cursor: pointer; }
 
       .panel {
         position: fixed;
@@ -30,8 +31,6 @@
       .centred { left: 12px; right: 12px; margin-inline: auto; width: fit-content; }
       .dim { color: #64748b; }
       hr.sep { border: 0; border-top: 1px solid #262c37; margin: 8px 0; }
-      .bar { height: 4px; margin: 5px 0 3px; background: #151921; border-radius: 2px; overflow: hidden; }
-      #wave-bar { height: 100%; width: 0; background: #7dd3fc; }
       canvas.spark {
         display: block;
         width: 190px;
@@ -104,7 +103,6 @@
         user-select: none;
       }
       #banner strong { display: block; font-size: 20px; letter-spacing: 3px; color: #f87171; }
-      #banner-best { color: #fbbf24; }
       #banner span { color: #9aa4b2; font-weight: 400; }
     </style>
   </head>
@@ -117,10 +115,6 @@
         <div class="row"><span>junctions <b id="n-junctions">0</b></span><span>dead ends <b id="n-deadends">0</b></span></div>
         <hr class="sep" />
       </div>
-      <div class="row"><span>wave <b id="n-wave">1</b></span><span>best <b id="n-best">0</b></span></div>
-      <div class="bar"><div id="wave-bar"></div></div>
-      <div class="row dim"><span>next wave</span><span id="n-next">--</span></div>
-      <hr class="sep" />
       <div class="row"><span>cars <b id="n-cars">0</b></span><span>avg <b id="n-speed">0 km/h</b></span></div>
       <div class="row"><span>waiting <b id="n-waiting">0</b></span><span>arrived <b id="n-arrived">0</b></span></div>
       <div class="row"><span>roads</span><b id="n-length">0 m</b></div>
@@ -136,13 +130,13 @@
     <div id="banner" class="centred" hidden>
       <strong>GRIDLOCK</strong>
       <div id="banner-sub"></div>
-      <div id="banner-best"></div>
       <span>press R to restart traffic</span>
     </div>
 
     <div class="panel centred" id="help" hidden>
       <div><kbd>drag</kbd> draw a road; its ends snap onto nearby roads</div>
       <div><kbd>space</kbd>+drag or middle-drag to pan &middot; <kbd>wheel</kbd> to zoom</div>
+      <div><kbd>T</kbd> control tool: click a junction to cycle signal &rarr; priority road &rarr; roundabout &rarr; none; <kbd>shift</kbd>+click a priority junction to swap which road is major</div>
       <div>time stands still while you are drawing a road</div>
       <div>traffic enters and leaves at dead ends (<span class="amber">amber</span> dots); the badge above one counts trips waiting to get in</div>
       <div><kbd>P</kbd> pause &middot; <kbd>1</kbd> <kbd>2</kbd> <kbd>4</kbd> speed &middot; <kbd>R</kbd> restart traffic</div>
@@ -152,12 +146,13 @@
     <div class="panel centred" id="toolbar">
       <button data-action="draw" class="active" title="Draw roads (D)">Draw<kbd>D</kbd></button>
       <button data-action="erase" title="Erase a road (E)">Erase<kbd>E</kbd></button>
+      <button data-action="control" title="Set a junction's control (T)">Control<kbd>T</kbd></button>
       <span class="sep"></span>
       <button data-action="play" title="Pause or resume traffic (P)"><span class="label">Pause</span><kbd>P</kbd></button>
       <button data-action="speed" data-speed="1" class="active" title="Normal speed (1)">1&times;</button>
       <button data-action="speed" data-speed="2" title="Double speed (2)">2&times;</button>
       <button data-action="speed" data-speed="4" title="Four times speed (4)">4&times;</button>
-      <button data-action="reset" title="Restart traffic from wave 1 (R)">Restart<kbd>R</kbd></button>
+      <button data-action="reset" title="Restart traffic (R)">Restart<kbd>R</kbd></button>
       <span class="sep"></span>
       <button data-action="undo" title="Undo the last road edit (&#8984;Z)">Undo<kbd>&#8984;Z</kbd></button>
       <button data-action="clear" title="Remove every road (C)">Clear<kbd>C</kbd></button>

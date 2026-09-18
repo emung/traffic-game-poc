@@ -20,7 +20,7 @@ export const CAR_WIDTH = 1.9;
 /** 50 km/h in m/s. */
 export const DESIRED_SPEED = 13.9;
 export const SPEED_VARIATION = 0.18;
-export const MAX_ACCEL = 1.8;
+export const MAX_ACCEL = 32;
 export const COMFORT_BRAKE = 2.2;
 export const MAX_BRAKE = 8;
 export const MIN_GAP = 2;
@@ -40,17 +40,65 @@ export const CLAIM_BRAKE = 3.5;
  * straight-throughs still run together while near misses at the node do not.
  */
 export const MOVEMENT_CLEARANCE = 3;
+/**
+ * Speed through a junction with no control (three or more roads, nothing placed on it), 20 km/h.
+ * Plain junctions used to cost nothing: cars claimed non-conflicting paths and crossed at full
+ * speed, which beat every control. Slowing them is what gives signals, priority roads and
+ * roundabouts something to improve on.
+ */
+export const UNCONTROLLED_SPEED = 5.5;
+/**
+ * A roundabout's box is bigger than a plain junction's: vehicles enter it this far back from the
+ * node, and its ring is `ROUNDABOUT_RING_FRACTION` of that. On short roads the box shrinks to
+ * fit (see `LaneNetwork.roundaboutZone`).
+ */
+export const ROUNDABOUT_ZONE = 12;
+export const ROUNDABOUT_RING_FRACTION = 0.6;
+/**
+ * Entering a roundabout: a car yields to one on the ring that will reach its entry within this
+ * arc length (upstream), and keeps this arc length behind one that has just passed it. Together
+ * they let cars follow each other round the ring instead of taking turns with the whole box.
+ */
+export const ROUNDABOUT_YIELD_ARC = 14;
+/**
+ * ...plus this many seconds of its speed. An entering car may be nearly stopped, so a car on the
+ * ring 14 m upstream would be on top of it within a second; the faster the ring car, the further
+ * upstream it must be before the entrant can go.
+ */
+export const ROUNDABOUT_YIELD_TIME = 2;
+export const ROUNDABOUT_FOLLOW_ARC = 8;
+/**
+ * A car that has claimed but not yet reached the ring is still creeping in, so a car behind it
+ * keeps `ROUNDABOUT_FOLLOW_ARC` plus this much per metre the claimant still has to travel before
+ * joining. Without it a car already on the ring runs up behind an entrant that is not on it yet.
+ */
+export const ROUNDABOUT_ENTRY_LAG = 4;
+/** Speed round a roundabout, 29 km/h: faster than a plain junction, which is the point of it. */
+export const ROUNDABOUT_SPEED = 8;
+/** A minor-road car yields to a major-road car that is this close to the junction... */
+export const YIELD_LOOKAHEAD = 40;
+/** ...and always to one waiting this close to the line, moving or not: a standing major-road
+ *  queue must not lose its turn to the minor road. */
+export const YIELD_QUEUE_DIST = 12;
+/** ...and would reach it within this many seconds at its current speed. A car creeping up from
+ *  rest does not count, so a minor road is not held for a car that is still a long way off. */
+export const YIELD_TIME = 3;
+/**
+ * A car ahead on the exit lane counts as making room for a follower if it is moving at least
+ * this share of its desired speed: it will be clear by the time the follower arrives.
+ */
+export const EXIT_FLOW_SPEED_FRACTION = 0.5;
+/** Seconds ahead used to project a flowing car on the exit lane, about a follower's approach time. */
+export const EXIT_LOOKAHEAD = 1;
+/** How far along the exit lane everything must be flowing for that projection to be trusted. */
+export const EXIT_FLOW_CHECK_LENGTH = 60;
 export const MAX_VEHICLES = 300;
 /** Cap on trips queued at the entrances. Far beyond it the run has failed long ago anyway. */
 export const MAX_WAITING = 400;
 
 // --- demand ---
-/** Seconds per wave; demand steps up at each one. */
-export const WAVE_SECONDS = 30;
-/** Spawn attempts per second during the first wave. */
-export const BASE_SPAWN_RATE = 1.1;
-/** Extra share of the base rate added by each wave after the first. */
-export const WAVE_GROWTH = 0.35;
+/** Trip requests per second. Constant: demand does not ramp up over time. */
+export const SPAWN_RATE = 1.1;
 /**
  * How many times longer than a free run a journey may average before the network counts as
  * failed. Absolute speed is a poor signal: a busy network settles at a low but steady speed and
@@ -85,6 +133,17 @@ export const ROUTE_WEIGHT_TIME_CONSTANT = 20;
  *  penalty rather than making Dijkstra treat it as deleted from the graph. */
 export const MIN_ROUTING_HEAT = 0.05;
 
+/**
+ * A signal phase runs green, then yellow, then a short all-red before the next phase. A queue
+ * discharges about one car per 1.9 s, so 15 s of green passes roughly 8 cars per lane. Longer
+ * green passes more per phase but raises delay when traffic is light, since a car arriving at a
+ * red waits out more of the other phase.
+ */
+export const SIGNAL_GREEN_SECONDS = 15;
+/** Vehicles that could not stop comfortably still go; everyone further back stops. */
+export const SIGNAL_YELLOW_SECONDS = 2;
+export const SIGNAL_ALL_RED_SECONDS = 1;
+
 export const COLORS = {
   bg: '#11141a',
   gridMinor: '#191d25',
@@ -101,4 +160,10 @@ export const COLORS = {
   carSlow: '#fbbf24',
   carFast: '#4ade80',
   junctionBusy: '#fbbf24',
+  controlSignal: '#f472b6',
+  controlPriority: '#a78bfa',
+  controlRoundabout: '#34d399',
+  signalGreen: '#4ade80',
+  signalYellow: '#fbbf24',
+  signalRed: '#f87171',
 };

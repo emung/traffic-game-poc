@@ -56,7 +56,6 @@ export interface TrafficStats {
   stuck: number;
   /** Trips queued at entrances because there is no room to get in. */
   waiting: number;
-  wave: number;
   failed: boolean;
 }
 
@@ -65,8 +64,6 @@ export interface HistorySample {
   delay: number;
 }
 
-/** Distance past a junction at which a vehicle has cleared the box and gives it back. */
-const RELEASE_AT = C.JUNCTION_RADIUS + C.CAR_LENGTH;
 
 /** Intelligent Driver Model acceleration. */
 function idmAccel(v: Vehicle, gap: number, leaderSpeed: number): number {
@@ -96,7 +93,6 @@ export class TrafficSim {
   /** Entrance node -> trips queued there, oldest first. */
   private readonly waiting = new Map<number, WaitingTrip[]>();
   private nextId = 1;
-  private waveClock = 0;
   private spawnCredit = 0;
   private historyTimer = 0;
   private routeReweighTimer = 0;
@@ -149,21 +145,6 @@ export class TrafficSim {
     this.lowSpeedFor = 0;
     this.failed = false;
     this.waiting.clear();
-    this.waveClock = 0;
-  }
-
-  /**
-   * Demand steps up every wave, so a network that copes now will not cope for long. The wave
-   * clock only runs while there is traffic to serve, so an empty or unconnected map cannot bank
-   * waves by being left open.
-   */
-  get wave(): number {
-    return Math.floor(this.waveClock / C.WAVE_SECONDS) + 1;
-  }
-
-  /** Simulated seconds until demand next steps up. */
-  get waveRemaining(): number {
-    return C.WAVE_SECONDS - (this.waveClock % C.WAVE_SECONDS);
   }
 
   get waitingCount(): number {
@@ -174,10 +155,6 @@ export class TrafficSim {
 
   waitingAt(node: number): number {
     return this.waiting.get(node)?.length ?? 0;
-  }
-
-  private spawnRate(): number {
-    return C.BASE_SPAWN_RATE * (1 + (this.wave - 1) * C.WAVE_GROWTH);
   }
 
   step(graph: RoadGraph, dt: number): void {
@@ -197,14 +174,13 @@ export class TrafficSim {
     this.updateHeat(dt);
     this.updateRouteWeights(dt);
 
-    this.spawnCredit += dt * this.spawnRate();
+    this.spawnCredit += dt * C.SPAWN_RATE;
     while (this.spawnCredit >= 1) {
       this.spawnCredit -= 1;
       this.requestTrip(graph);
     }
     this.admitWaiting(graph);
 
-    if (this.vehicles.length || this.waitingCount) this.waveClock += dt;
     this.sampleHistory(dt);
     this.checkGridlock(dt);
   }
@@ -290,7 +266,7 @@ export class TrafficSim {
           const next = this.laneAhead(v);
           const ahead = next ? this.byLane.get(next.id)?.[0] : undefined;
           if (next && ahead) {
-            gap = lane.length - v.s + ahead.s - C.CAR_LENGTH;
+            gap = lane.length - v.s + ahead.s + this.spanShift(lane.id, next.id) - C.CAR_LENGTH;
             leaderSpeed = ahead.v;
           }
         }
@@ -300,10 +276,52 @@ export class TrafficSim {
           gap = stopGap;
           leaderSpeed = 0;
         }
-        accel.set(v.id, idmAccel(v, gap, leaderSpeed));
+        accel.set(v.id, Math.min(idmAccel(v, gap, leaderSpeed), this.junctionSpeedCap(v, lane)));
       }
     }
     return accel;
+  }
+
+  /**
+   * The speed limit through the junction at `node`: slow for a plain one, moderate for a
+   * roundabout, none for a signal or priority junction (which control traffic another way).
+   */
+  private junctionSpeedLimit(node: number): number {
+    if (this.network.plainJunctions.has(node)) return C.UNCONTROLLED_SPEED;
+    if (this.network.controls.get(node) === 'roundabout') return C.ROUNDABOUT_SPEED;
+    return Infinity;
+  }
+
+  /**
+   * Upper bound on acceleration that brings a vehicle down to the junction's speed limit by the
+   * edge of the box, and holds it there while it crosses. Braking starts, at a comfortable
+   * deceleration, only once it could not otherwise get down in time, so cars do not crawl up to
+   * the junction. Infinity when the junction ahead has no limit or the vehicle is already slow.
+   */
+  private junctionSpeedCap(v: Vehicle, lane: Lane): number {
+    // Still inside the box the vehicle has just left behind? Then that junction's limit applies:
+    // without this, cars accelerate to full speed halfway round a roundabout and run up behind
+    // the ones ahead of them.
+    if (v.leg > 0 && v.s < this.network.zoneOf(lane.from)) {
+      const leaving = this.junctionSpeedLimit(lane.from);
+      if (Number.isFinite(leaving)) return Math.max(-C.MAX_BRAKE, (leaving - v.v) * 2);
+    }
+    const limit = this.junctionSpeedLimit(lane.to);
+    if (!Number.isFinite(limit)) return Infinity;
+    const toBox = lane.length - v.s - this.network.zoneOf(lane.to);
+    if (toBox <= 0 || v.holding?.node === lane.to) return Math.max(-C.MAX_BRAKE, (limit - v.v) * 2);
+    const excess = v.v * v.v - limit * limit;
+    if (excess <= 2 * C.COMFORT_BRAKE * toBox) return Infinity;
+    return -Math.min(C.MAX_BRAKE, Math.max(C.COMFORT_BRAKE, excess / (2 * toBox)));
+  }
+
+  /**
+   * How much longer than `2 * zone` the crossing from `inLane` to `outLane` is. Zero for a plain
+   * junction. Added to the gap between a vehicle approaching the node and one already through it.
+   */
+  private spanShift(inLane: number, outLane: number): number {
+    const m = this.network.movementFor(inLane, outLane);
+    return m ? m.span - 2 * m.zone : 0;
   }
 
   /**
@@ -315,15 +333,20 @@ export class TrafficSim {
     if (!next) return null;
 
     const node = lane.to;
+    const zone = this.network.zoneOf(node);
     const remaining = lane.length - v.s;
-    const stopGap = Math.max(0, remaining - C.JUNCTION_RADIUS);
-    const insideBox = remaining < C.JUNCTION_RADIUS;
+    const stopGap = Math.max(0, remaining - zone);
+    const insideBox = remaining < zone;
 
     if (v.holding && v.holding.node === node) {
       // Once the nose is in the box the vehicle is committed. Before that, it gives the
       // movement back if the far side filled up during the approach -- holding a path it
       // cannot clear is what gridlocks the network.
-      if (!insideBox && !this.exitHasRoom(next)) {
+      // It can only give the movement back if it can still stop in front of the box: a car that
+      // releases at speed a few metres out just rolls into the box without holding it, and stands
+      // there in the path of everything else.
+      const canStop = stopGap >= (v.v * v.v) / (2 * C.CLAIM_BRAKE);
+      if (!insideBox && canStop && !this.exitHasRoom(next)) {
         this.release(v);
         return stopGap;
       }
@@ -336,17 +359,150 @@ export class TrafficSim {
     // Claim as late as possible so the path is not held for a whole street, but never later
     // than the point where the vehicle could still stop at the line. A fast vehicle therefore
     // claims early and keeps its speed, while a queued one claims late and the junction cycles
-    // quickly. Braking itself is planned from any distance, so a vehicle that cannot claim has
-    // always slowed down by the time it arrives.
-    const claimDist = Math.max(
-      C.JUNCTION_CLAIM_DIST,
-      C.JUNCTION_RADIUS + (v.v * v.v) / (2 * C.CLAIM_BRAKE),
-    );
-    if (remaining <= claimDist && this.movementIsClear(movement) && this.exitHasRoom(next)) {
+    // quickly. A vehicle that cannot claim once inside this distance brakes for the stop line
+    // and, by the definition of the distance, can still stop there.
+    const claimDist =
+      zone + Math.max(C.JUNCTION_CLAIM_DIST - C.JUNCTION_RADIUS, (v.v * v.v) / (2 * C.CLAIM_BRAKE));
+    const open = (withinClaim: boolean) =>
+      this.signalAllows(node, lane.id, withinClaim) &&
+      this.clearToEnter(movement) &&
+      this.majorIsClear(movement) &&
+      this.exitHasRoom(next);
+    if (remaining <= claimDist && open(true)) {
       this.claim(v, movement);
       return null;
     }
+    // Too far out to claim yet, but nothing would stop it if it were closer: keep going. Braking
+    // for an open junction from any distance is what made vehicles crawl up to a green light. If
+    // the junction closes before the vehicle reaches `claimDist` it can still stop at the line,
+    // because that distance is by definition the stopping distance at CLAIM_BRAKE.
+    if (remaining > claimDist && open(false)) return null;
     return stopGap;
+  }
+
+  /**
+   * Whether the signal at `node`, if there is one, lets `inLane` claim right now. A red light
+   * only withholds the claim; the vehicle then brakes for the stop line like at any busy
+   * junction, and a green one still has to pass the conflict check, so a vehicle that claimed
+   * late in the previous green is never run into. On yellow only a vehicle already inside its
+   * claim distance -- one that could no longer stop comfortably -- may enter.
+   */
+  private signalAllows(node: number, inLane: number, withinClaim: boolean): boolean {
+    const state = this.signalState(node, inLane);
+    if (state === 'yellow') return withinClaim;
+    return state !== 'red';
+  }
+
+  /**
+   * The signal head an approach currently shows, or null when the node has no signal. The cycle
+   * is a pure function of simulated time, so there is no timer state to keep in step with
+   * rebuilds. Each signal is offset by its node id so a grid does not switch in unison.
+   */
+  signalState(node: number, inLane: number): 'green' | 'yellow' | 'red' | null {
+    const phases = this.network.phases.get(node);
+    if (!phases) return null;
+    const index = phases.findIndex((lanes) => lanes.includes(inLane));
+    if (index < 0) return null;
+    const slot = C.SIGNAL_GREEN_SECONDS + C.SIGNAL_YELLOW_SECONDS + C.SIGNAL_ALL_RED_SECONDS;
+    const t = this.time + node * 3;
+    if (Math.floor(t / slot) % phases.length !== index) return 'red';
+    const into = t % slot;
+    if (into < C.SIGNAL_GREEN_SECONDS) return 'green';
+    return into < C.SIGNAL_GREEN_SECONDS + C.SIGNAL_YELLOW_SECONDS ? 'yellow' : 'red';
+  }
+
+  /**
+   * For a minor-road movement at a priority junction: true when no major-road vehicle that would
+   * cross it is about to arrive. Vehicles already in the box are covered by `movementIsClear`;
+   * this is the look-ahead that makes the minor road give way instead of merely not colliding.
+   * A major-road car counts if it is waiting at the line (unless its own exit is full, which minor
+   * traffic cannot clear), or is close and about to arrive. One still creeping up from rest a long
+   * way off does not, so the minor road is not held for it. Movements with nothing to yield to pass
+   * at once.
+   */
+  private majorIsClear(movement: Movement): boolean {
+    if (movement.yieldsTo.length === 0) return true;
+    const movements = this.network.movements.get(movement.node)!;
+    for (const key of movement.yieldsTo) {
+      const major = movements[key];
+      const lane = this.network.lanes.get(major.inLane);
+      const list = this.byLane.get(major.inLane);
+      if (!lane || !list) continue;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const other = list[i];
+        const remaining = lane.length - other.s;
+        if (remaining > C.YIELD_LOOKAHEAD) break;
+        const exit = this.laneAhead(other);
+        if (exit?.id !== major.outLane) continue;
+        const atLine = remaining <= C.YIELD_QUEUE_DIST && this.exitHasRoom(exit);
+        if (atLine || remaining / Math.max(other.v, 0.1) <= C.YIELD_TIME) return false;
+      }
+    }
+    return true;
+  }
+
+  /** Whether a movement may enter now: by where vehicles are on a ring, or by the static conflicts. */
+  private clearToEnter(movement: Movement): boolean {
+    return movement.ring ? this.ringIsClear(movement) : this.movementIsClear(movement);
+  }
+
+  /**
+   * How far along its movement's path a vehicle holding it has travelled, measured from the start
+   * of the box: negative while it is still approaching.
+   */
+  private pathProgress(v: Vehicle, m: Movement): number {
+    if (v.route[v.leg] === m.inLane) {
+      const lane = this.network.lanes.get(m.inLane)!;
+      return m.zone - (lane.length - v.s);
+    }
+    return m.span - m.zone + v.s;
+  }
+
+  /**
+   * Roundabout entry. Cars circulate anticlockwise and follow one another, so an entering car
+   * does not wait for the whole ring to empty: it yields to a car that will reach its entry point
+   * within `ROUNDABOUT_YIELD_ARC` plus a couple of seconds of its speed (upstream), and keeps `ROUNDABOUT_FOLLOW_ARC` behind one that
+   * has just passed it. A car still approaching the ring counts as being at its own entry point;
+   * one that has left the ring counts for nothing. Cars from the same approach are left to car
+   * following, and a U-turn, which never uses the ring, keeps the plain conflict rule.
+   */
+  private ringIsClear(m: Movement): boolean {
+    const ring = m.ring!;
+    const movements = this.network.movements.get(m.node)!;
+    const full = 2 * Math.PI;
+    const mod = (a: number) => ((a % full) + full) % full;
+
+    for (const h of this.vehicles) {
+      if (!h.holding || h.holding.node !== m.node || h.holding.key === m.key) continue;
+      const hm = movements[h.holding.key];
+      if (hm.inLane === m.inLane) continue;
+      // Two movements into the same exit lane merge, and a vehicle cannot see one that is still
+      // on the ring (its position on the exit lane is only virtual), so they take turns.
+      if (hm.outLane === m.outLane) {
+        if (hm.ring && this.pathProgress(h, hm) >= hm.ring.pathOut) continue;
+        return false;
+      }
+      if (!hm.ring) {
+        if (m.conflicts.has(hm.key)) return false;
+        continue;
+      }
+
+      const q = this.pathProgress(h, hm);
+      if (q >= hm.ring.pathOut) continue;
+      const span = Math.max(1e-6, hm.ring.pathOut - hm.ring.pathIn);
+      const frac = Math.max(0, Math.min(1, (q - hm.ring.pathIn) / span));
+      const at = hm.ring.entry - frac * hm.ring.sweep;
+      const remaining = (1 - frac) * hm.ring.sweep;
+
+      const upstream = mod(at - ring.entry);
+      const yieldArc = C.ROUNDABOUT_YIELD_ARC + h.v * C.ROUNDABOUT_YIELD_TIME;
+      if (upstream * ring.radius < yieldArc && upstream <= remaining + 1e-6) return false;
+      const passed = mod(ring.entry - at);
+      const toRing = Math.max(0, hm.ring.pathIn - q);
+      const followArc = C.ROUNDABOUT_FOLLOW_ARC + toRing * C.ROUNDABOUT_ENTRY_LAG;
+      if (passed * ring.radius < followArc && passed <= ring.sweep) return false;
+    }
+    return true;
   }
 
   /**
@@ -379,11 +535,25 @@ export class TrafficSim {
    * junction. A vehicle can only advance to `blocker.s - CAR_LENGTH - MIN_GAP`, so the exit must
    * hold a full car beyond the release threshold -- otherwise the vehicle parks in the box and
    * the junction is never handed back.
+   *
+   * Judged on where the car ahead is now, a queue discharges one car per ~2 s: each follower waits
+   * for its leader to be ~17 m out, and brakes while it waits, even though the leader is already
+   * doing full speed. So a car that is flowing counts by where it will be shortly. That is only
+   * trusted when everything in the first stretch of the exit lane is flowing, so a queue forming
+   * just past the junction still keeps followers out of the box.
    */
   private exitHasRoom(next: Lane): boolean {
-    const blocker = this.byLane.get(next.id)?.[0];
+    const list = this.byLane.get(next.id);
+    const blocker = list?.[0];
     if (!blocker) return true;
-    return blocker.s > RELEASE_AT + C.CAR_LENGTH + C.MIN_GAP + 1;
+    const needed = this.network.releaseAt(next.from, C.CAR_LENGTH) + C.CAR_LENGTH + C.MIN_GAP + 1;
+    if (blocker.s > needed) return true;
+
+    for (const other of list) {
+      if (other.s > C.EXIT_FLOW_CHECK_LENGTH) break;
+      if (other.v < C.EXIT_FLOW_SPEED_FRACTION * other.desiredSpeed) return false;
+    }
+    return blocker.s + blocker.v * C.EXIT_LOOKAHEAD > needed;
   }
 
   private laneAhead(v: Vehicle): Lane | undefined {
@@ -417,7 +587,9 @@ export class TrafficSim {
           v.v = 0;
           break;
         }
-        v.s -= lane.length;
+        // A roundabout crossing is longer or shorter than 2 * zone of lane distance; carrying the
+        // difference over keeps the vehicle's true position along its path continuous.
+        v.s -= lane.length + this.spanShift(lane.id, v.route[v.leg + 1]);
         v.leg++;
         lane = this.network.lanes.get(v.route[v.leg])!;
       }
@@ -430,7 +602,7 @@ export class TrafficSim {
         continue;
       }
 
-      if (v.holding && lane.from === v.holding.node && v.s > RELEASE_AT) {
+      if (v.holding && lane.from === v.holding.node && v.s > this.network.releaseAt(lane.from, C.CAR_LENGTH)) {
         this.release(v);
       }
       survivors.push(v);
@@ -532,19 +704,21 @@ export class TrafficSim {
   poseOf(v: Vehicle): Pose | null {
     const lane = this.network.lanes.get(v.route[v.leg]);
     if (!lane) return null;
-    const r = C.JUNCTION_RADIUS;
 
+    // Inside a box the vehicle is placed along the movement's path by how far it has travelled
+    // through it: `zone - remaining` on the way in, `span - zone + s` on the way out.
     const next = this.laneAhead(v);
     const remaining = lane.length - v.s;
-    if (next && remaining < r) {
-      const movement = this.network.movementFor(lane.id, next.id);
-      if (movement) return samplePolyline(movement.path, (r - remaining) / (2 * r));
+    if (next) {
+      const zone = this.network.zoneOf(lane.to);
+      const movement = remaining < zone ? this.network.movementFor(lane.id, next.id) : undefined;
+      if (movement) return samplePolyline(movement.path, (zone - remaining) / movement.span);
     }
 
-    if (v.leg > 0 && v.s < r) {
+    if (v.leg > 0 && v.s < this.network.zoneOf(lane.from)) {
       const prev = this.network.lanes.get(v.route[v.leg - 1]);
       const movement = prev && this.network.movementFor(prev.id, lane.id);
-      if (movement) return samplePolyline(movement.path, 0.5 + v.s / (2 * r));
+      if (movement) return samplePolyline(movement.path, (movement.span - movement.zone + v.s) / movement.span);
     }
 
     return this.network.sample(lane, v.s);
@@ -600,7 +774,6 @@ export class TrafficSim {
       delayRatio: ratioCount ? ratioSum / ratioCount : 1,
       stuck,
       waiting,
-      wave: this.wave,
       failed: this.failed,
     };
   }

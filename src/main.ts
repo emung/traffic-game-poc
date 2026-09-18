@@ -1,5 +1,5 @@
 import { type Vec2, dist } from './geom';
-import { RoadGraph, type RoadEdge } from './graph';
+import { JUNCTION_CONTROLS, RoadGraph, type JunctionControl, type RoadEdge, type RoadNode } from './graph';
 import { Camera } from './camera';
 import { render, type ViewState } from './render';
 import { TrafficSim } from './traffic';
@@ -9,7 +9,6 @@ import {
   SIM_STEP,
   SNAP_RADIUS,
   UNDO_LIMIT,
-  WAVE_SECONDS,
 } from './config';
 
 const canvas = document.getElementById('c') as HTMLCanvasElement;
@@ -18,7 +17,7 @@ const cam = new Camera();
 const graph = new RoadGraph();
 const sim = new TrafficSim();
 
-type Tool = 'draw' | 'erase';
+type Tool = 'draw' | 'erase' | 'control';
 let tool: Tool = 'draw';
 let spaceHeld = false;
 let panning = false;
@@ -28,15 +27,11 @@ let lastScreen: Vec2 = { x: 0, y: 0 };
 /** Simulated seconds per real second. */
 let speed = 1;
 
-const view: ViewState = { liveStroke: null, snap: null, hoverEdge: null, debug: false };
+const view: ViewState = { liveStroke: null, snap: null, hoverEdge: null, hoverNode: null, debug: false };
 const undoStack: string[] = [];
 
 const STORAGE_KEY = 'traffic-game/graph';
-const BEST_WAVE_KEY = 'traffic-game/best-wave';
 
-let bestWave = Number(localStorage.getItem(BEST_WAVE_KEY)) || 0;
-/** The record as it stood when this run began, so the end of a run can say whether it beat it. */
-let bestBeforeRun = bestWave;
 let failureShown = false;
 
 function pushUndo(): void {
@@ -122,6 +117,18 @@ function edgeUnder(p: Vec2): RoadEdge | null {
   return graph.edgeNear(p, 6)?.edge ?? null;
 }
 
+/** A junction the control tool can act on: a node where at least three roads meet. */
+function junctionUnder(p: Vec2): RoadNode | null {
+  const node = graph.nodeNear(p, SNAP_RADIUS);
+  return node && node.edges.length >= 3 ? node : null;
+}
+
+/** none -> signal -> priority -> roundabout -> none */
+function nextControl(current: JunctionControl | undefined): JunctionControl | null {
+  if (!current) return JUNCTION_CONTROLS[0];
+  return JUNCTION_CONTROLS[JUNCTION_CONTROLS.indexOf(current) + 1] ?? null;
+}
+
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
   lastScreen = screenOf(e);
@@ -141,6 +148,26 @@ canvas.addEventListener('pointerdown', (e) => {
       graph.pruneOrphans();
       view.hoverEdge = null;
       persist();
+    }
+    return;
+  }
+  if (tool === 'control') {
+    const node = junctionUnder(world);
+    if (node) {
+      if (e.shiftKey && node.control === 'priority') {
+        // Rotate which road is major; the network must be current to know the candidates.
+        sim.sync(graph);
+        const bearing = sim.network.nextMajorBearing(node.id);
+        if (bearing !== null) {
+          pushUndo();
+          graph.setMajorBearing(node.id, bearing);
+          persist();
+        }
+      } else {
+        pushUndo();
+        graph.setControl(node.id, nextControl(node.control));
+        persist();
+      }
     }
     return;
   }
@@ -170,6 +197,7 @@ canvas.addEventListener('pointermove', (e) => {
 
   view.snap = tool === 'draw' ? snapTargetAt(world) : null;
   view.hoverEdge = tool === 'erase' ? edgeUnder(world) : null;
+  view.hoverNode = tool === 'control' ? junctionUnder(world) : null;
 });
 
 function endStroke(): void {
@@ -215,9 +243,12 @@ function setTool(next: Tool): void {
   tool = next;
   view.snap = null;
   view.hoverEdge = null;
+  view.hoverNode = null;
   canvas.classList.toggle('erasing', tool === 'erase');
+  canvas.classList.toggle('controlling', tool === 'control');
   for (const btn of buttons('draw')) btn.classList.toggle('active', tool === 'draw');
   for (const btn of buttons('erase')) btn.classList.toggle('active', tool === 'erase');
+  for (const btn of buttons('control')) btn.classList.toggle('active', tool === 'control');
 }
 
 function setRunning(run: boolean): void {
@@ -247,20 +278,20 @@ function toggleHelp(): void {
 
 function startRun(): void {
   sim.reset();
-  bestBeforeRun = bestWave;
   failureShown = false;
   setRunning(true);
 }
 
 /**
  * Undo rewinds the roads, not the run. Traffic on roads that survive keeps going, which is what
- * makes fixing a bad stroke mid-wave cheap; restarting the run is a separate, explicit action.
+ * makes fixing a bad stroke mid-run cheap; restarting the run is a separate, explicit action.
  */
 function undo(): void {
   const snapshot = undoStack.pop();
   if (!snapshot) return;
   graph.loadJSON(snapshot);
   view.hoverEdge = null;
+  view.hoverNode = null;
   persist();
 }
 
@@ -274,6 +305,7 @@ function clearAll(): void {
 const actions: Record<string, (btn: HTMLButtonElement) => void> = {
   draw: () => setTool('draw'),
   erase: () => setTool('erase'),
+  control: () => setTool('control'),
   play: () => setRunning(!sim.running),
   speed: (btn) => setSpeed(Number(btn.dataset.speed)),
   reset: () => startRun(),
@@ -313,6 +345,9 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'e':
       setTool('erase');
+      break;
+    case 't':
+      setTool('control');
       break;
     case 'p':
       setRunning(!sim.running);
@@ -354,10 +389,6 @@ const el = {
   edges: document.getElementById('n-edges')!,
   junctions: document.getElementById('n-junctions')!,
   deadends: document.getElementById('n-deadends')!,
-  wave: document.getElementById('n-wave')!,
-  best: document.getElementById('n-best')!,
-  waveBar: document.getElementById('wave-bar') as HTMLElement,
-  next: document.getElementById('n-next')!,
   cars: document.getElementById('n-cars')!,
   speed: document.getElementById('n-speed')!,
   waiting: document.getElementById('n-waiting')!,
@@ -368,7 +399,6 @@ const el = {
   hold: document.getElementById('hold') as HTMLElement,
   banner: document.getElementById('banner') as HTMLElement,
   bannerSub: document.getElementById('banner-sub')!,
-  bannerBest: document.getElementById('banner-best')!,
 };
 
 const sparkFlow = (document.getElementById('spark-flow') as HTMLCanvasElement).getContext('2d')!;
@@ -438,16 +468,6 @@ function updateHud(): void {
   }
 
   const t = sim.stats();
-  const busy = t.vehicles > 0 || t.waiting > 0;
-  if (busy && t.wave > bestWave) {
-    bestWave = t.wave;
-    localStorage.setItem(BEST_WAVE_KEY, String(bestWave));
-  }
-  el.wave.textContent = String(t.wave);
-  el.best.textContent = String(bestWave);
-  el.waveBar.style.width = `${(1 - sim.waveRemaining / WAVE_SECONDS) * 100}%`;
-  el.next.textContent = busy ? `in ${Math.ceil(sim.waveRemaining)} s` : 'no traffic';
-
   el.cars.textContent = String(t.vehicles);
   el.speed.textContent = `${t.avgSpeedKmh.toFixed(0)} km/h`;
   el.waiting.textContent = String(t.waiting);
@@ -467,9 +487,7 @@ function updateHud(): void {
   if (t.failed && !failureShown) {
     failureShown = true;
     setRunning(false);
-    el.bannerSub.textContent = `gridlocked in wave ${t.wave} · journeys took ${t.delayRatio.toFixed(1)}x too long`;
-    el.bannerBest.textContent =
-      t.wave > bestBeforeRun ? `new best: wave ${t.wave}` : `best: wave ${bestWave}`;
+    el.bannerSub.textContent = `gridlocked after ${Math.round(sim.time)} s · journeys took ${t.delayRatio.toFixed(1)}x too long`;
   }
   el.banner.hidden = !t.failed;
   el.hold.hidden = !(drawing && sim.running);
@@ -484,7 +502,7 @@ function frame(now: number): void {
 
   if (drawing) {
     // Time stands still while a stroke is being drawn, so a fix can be drawn with care even
-    // mid-wave. The time that passed is dropped, not replayed as a burst on release.
+    // mid-run. The time that passed is dropped, not replayed as a burst on release.
     accumulator = 0;
   } else {
     accumulator += elapsed * speed;

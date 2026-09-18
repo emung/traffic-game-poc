@@ -1,15 +1,37 @@
 import { type Vec2 } from './geom';
-import { type RoadEdge, type RoadGraph } from './graph';
+import { type JunctionControl, type RoadEdge, type RoadGraph, type RoadNode } from './graph';
 import { type Camera } from './camera';
-import { COLORS, ROAD_WIDTH, SNAP_RADIUS, CAR_LENGTH, CAR_WIDTH, LANE_OFFSET } from './config';
+import {
+  COLORS,
+  ROAD_WIDTH,
+  SNAP_RADIUS,
+  CAR_LENGTH,
+  CAR_WIDTH,
+  LANE_OFFSET,
+  JUNCTION_RADIUS,
+} from './config';
 import { type TrafficSim } from './traffic';
 
 export interface ViewState {
   liveStroke: Vec2[] | null;
   snap: { pos: Vec2; kind: 'node' | 'edge' } | null;
   hoverEdge: RoadEdge | null;
+  /** Junction the control tool would change on click. */
+  hoverNode: RoadNode | null;
   debug: boolean;
 }
+
+const CONTROL_COLORS: Record<JunctionControl, string> = {
+  signal: COLORS.controlSignal,
+  priority: COLORS.controlPriority,
+  roundabout: COLORS.controlRoundabout,
+};
+
+const HEAD_COLORS = {
+  green: COLORS.signalGreen,
+  yellow: COLORS.signalYellow,
+  red: COLORS.signalRed,
+};
 
 function tracePolyline(ctx: CanvasRenderingContext2D, pts: Vec2[]): void {
   ctx.beginPath();
@@ -72,13 +94,49 @@ function drawRoads(ctx: CanvasRenderingContext2D, graph: RoadGraph, view: ViewSt
   ctx.globalAlpha = 1;
 }
 
-function drawNodes(ctx: CanvasRenderingContext2D, graph: RoadGraph, cam: Camera): void {
+/** A ring road round a central island: cars drive the ring, anticlockwise, between the arms. */
+function drawRoundabout(ctx: CanvasRenderingContext2D, cam: Camera, node: RoadNode, ring: number): void {
+  const lane = ROAD_WIDTH / 2;
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = COLORS.casing;
+  ctx.lineWidth = lane + 2.5;
+  ctx.beginPath();
+  ctx.arc(node.pos.x, node.pos.y, ring, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = COLORS.road;
+  ctx.lineWidth = lane;
+  ctx.stroke();
+
+  ctx.fillStyle = COLORS.bg;
+  ctx.beginPath();
+  ctx.arc(node.pos.x, node.pos.y, Math.max(0.5, ring - lane / 2 - 0.6), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = COLORS.controlRoundabout;
+  ctx.lineWidth = 1.2 / cam.zoom;
+  ctx.stroke();
+}
+
+function drawNodes(ctx: CanvasRenderingContext2D, graph: RoadGraph, cam: Camera, sim: TrafficSim): void {
   const r = Math.max(1.6, 4 / cam.zoom);
   for (const node of graph.nodes.values()) {
+    const ring = node.edges.length >= 3 ? sim.network.ringRadiusOf(node.id) : null;
+    if (ring !== null) {
+      drawRoundabout(ctx, cam, node, ring);
+      continue;
+    }
     ctx.fillStyle = node.edges.length >= 3 ? COLORS.node : COLORS.nodeEnd;
     ctx.beginPath();
     ctx.arc(node.pos.x, node.pos.y, r, 0, Math.PI * 2);
     ctx.fill();
+
+    // A control on a node that dropped below three roads does nothing, so it is not drawn.
+    if (node.control && node.edges.length >= 3) {
+      ctx.strokeStyle = CONTROL_COLORS[node.control];
+      ctx.lineWidth = 1.6 / cam.zoom;
+      ctx.beginPath();
+      ctx.arc(node.pos.x, node.pos.y, JUNCTION_RADIUS, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
 }
 
@@ -93,6 +151,14 @@ function drawOverlay(ctx: CanvasRenderingContext2D, cam: Camera, view: ViewState
     ctx.stroke();
     ctx.globalAlpha = 1;
     ctx.lineWidth = 1.2 / cam.zoom;
+    ctx.stroke();
+  }
+
+  if (view.hoverNode) {
+    ctx.strokeStyle = COLORS.snap;
+    ctx.lineWidth = 1.5 / cam.zoom;
+    ctx.beginPath();
+    ctx.arc(view.hoverNode.pos.x, view.hoverNode.pos.y, JUNCTION_RADIUS + 3, 0, Math.PI * 2);
     ctx.stroke();
   }
 
@@ -181,6 +247,45 @@ function drawVehicles(ctx: CanvasRenderingContext2D, sim: TrafficSim): void {
   }
 }
 
+/** A bar across each approach at the stop line, red or green with the signal's current head. */
+function drawSignals(ctx: CanvasRenderingContext2D, cam: Camera, sim: TrafficSim): void {
+  ctx.lineCap = 'butt';
+  ctx.lineWidth = Math.max(0.9, 2.5 / cam.zoom);
+  for (const [node, phases] of sim.network.phases) {
+    for (const laneId of phases.flat()) {
+      const lane = sim.network.lanes.get(laneId);
+      if (!lane) continue;
+      const pose = sim.network.sample(lane, lane.length - JUNCTION_RADIUS);
+      const half = ROAD_WIDTH / 4;
+      ctx.strokeStyle = HEAD_COLORS[sim.signalState(node, laneId) ?? 'red'];
+      ctx.beginPath();
+      ctx.moveTo(pose.pos.x - pose.dir.y * half, pose.pos.y + pose.dir.x * half);
+      ctx.lineTo(pose.pos.x + pose.dir.y * half, pose.pos.y - pose.dir.x * half);
+      ctx.stroke();
+    }
+  }
+}
+
+/** A dashed give-way line across each minor approach of a priority junction. */
+function drawYields(ctx: CanvasRenderingContext2D, cam: Camera, sim: TrafficSim): void {
+  ctx.lineCap = 'butt';
+  ctx.lineWidth = Math.max(0.9, 2.5 / cam.zoom);
+  ctx.strokeStyle = COLORS.controlPriority;
+  ctx.setLineDash([1.2, 1]);
+  for (const [node, major] of sim.network.majorLanes) {
+    for (const lane of sim.network.lanes.values()) {
+      if (lane.to !== node || major.has(lane.id)) continue;
+      const pose = sim.network.sample(lane, lane.length - JUNCTION_RADIUS);
+      const half = ROAD_WIDTH / 4;
+      ctx.beginPath();
+      ctx.moveTo(pose.pos.x - pose.dir.y * half, pose.pos.y + pose.dir.x * half);
+      ctx.lineTo(pose.pos.x + pose.dir.y * half, pose.pos.y - pose.dir.x * half);
+      ctx.stroke();
+    }
+  }
+  ctx.setLineDash([]);
+}
+
 function drawBusyJunctions(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGraph, sim: TrafficSim): void {
   ctx.strokeStyle = COLORS.junctionBusy;
   ctx.lineWidth = 1.2 / cam.zoom;
@@ -230,7 +335,9 @@ export function render(
   drawGrid(ctx, cam);
   drawRoads(ctx, graph, view);
   drawHeat(ctx, sim);
-  drawNodes(ctx, graph, cam);
+  drawNodes(ctx, graph, cam, sim);
+  drawSignals(ctx, cam, sim);
+  drawYields(ctx, cam, sim);
   drawVehicles(ctx, sim);
   if (view.debug) drawBusyJunctions(ctx, cam, graph, sim);
   drawOverlay(ctx, cam, view);
