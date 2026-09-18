@@ -5,6 +5,13 @@
 Work goes straight onto `main`. The owner confirmed on 2026-09-18 that this personal repo does
 not use feature branches, so there is no need to ask before editing files on `main`.
 
+Run `npm test` after adding a feature or landing a fix, before considering the work done — the
+owner confirmed on 2026-09-18 that every change should be checked against the full suite, not
+just the area touched. When a change adds real behavior, add a test for it in the relevant
+`src/*.test.ts` file (see "Automated tests" below for what each file covers); when a change makes
+an existing test redundant or obsolete (the behavior it checked no longer exists, or it's fully
+subsumed by a newer test), remove it rather than leaving it to rot.
+
 ## Scope and roadmap
 
 Milestones are built one at a time. 1–5 are done; 6–17 are candidates.
