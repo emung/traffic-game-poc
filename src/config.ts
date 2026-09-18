@@ -71,6 +71,20 @@ export const HISTORY_LENGTH = 120;
 export const SIM_STEP = 1 / 60;
 export const MAX_SUBSTEPS = 5;
 
+// --- routing ---
+/** How often route weights are recomputed from lane heat, and the route cache expires. */
+export const ROUTE_REWEIGH_SECONDS = 5;
+/**
+ * How slowly a route's weight follows a change at each reweigh -- slower than, and separate
+ * from, HEAT_TIME_CONSTANT. Without this, every trip planned inside one reweigh window would
+ * pile onto whichever road just looked cheaper, jam it by the next window, and swap back the
+ * window after.
+ */
+export const ROUTE_WEIGHT_TIME_CONSTANT = 20;
+/** Floor on lane heat used for routing weight, so a jammed lane reads as a severe but finite
+ *  penalty rather than making Dijkstra treat it as deleted from the graph. */
+export const MIN_ROUTING_HEAT = 0.05;
+
 export const COLORS = {
   bg: '#11141a',
   gridMinor: '#191d25',

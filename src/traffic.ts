@@ -99,6 +99,7 @@ export class TrafficSim {
   private waveClock = 0;
   private spawnCredit = 0;
   private historyTimer = 0;
+  private routeReweighTimer = 0;
   private lowSpeedFor = 0;
   running = false;
   failed = false;
@@ -144,6 +145,7 @@ export class TrafficSim {
     this.time = 0;
     this.spawnCredit = 0;
     this.historyTimer = 0;
+    this.routeReweighTimer = 0;
     this.lowSpeedFor = 0;
     this.failed = false;
     this.waiting.clear();
@@ -193,6 +195,7 @@ export class TrafficSim {
 
     this.advanceLegs();
     this.updateHeat(dt);
+    this.updateRouteWeights(dt);
 
     this.spawnCredit += dt * this.spawnRate();
     while (this.spawnCredit >= 1) {
@@ -224,6 +227,17 @@ export class TrafficSim {
       const current = this.laneHeat.get(lane.id) ?? 1;
       this.laneHeat.set(lane.id, current + (target - current) * alpha);
     }
+  }
+
+  /**
+   * Reweighs the router from the freshly updated lane heat, on a slower cadence than heat itself
+   * so route choice does not chase every instantaneous fluctuation.
+   */
+  private updateRouteWeights(dt: number): void {
+    this.routeReweighTimer += dt;
+    if (this.routeReweighTimer < C.ROUTE_REWEIGH_SECONDS) return;
+    this.routeReweighTimer = 0;
+    this.router.updateTravelTimes(this.laneHeat);
   }
 
   private sampleHistory(dt: number): void {

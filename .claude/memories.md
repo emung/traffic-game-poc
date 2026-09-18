@@ -14,7 +14,7 @@ subsumed by a newer test), remove it rather than leaving it to rot.
 
 ## Scope and roadmap
 
-Milestones are built one at a time. 1–5 are done; 6–17 are candidates.
+Milestones are built one at a time. 1–6 are done; 7–17 are candidates.
 
 1. **Drawing -> road graph** (done) — freehand strokes become a clean node/edge graph.
 2. **Traffic simulation** (done) — dead-end spawners, Dijkstra routing, IDM car-following,
@@ -25,6 +25,8 @@ Milestones are built one at a time. 1–5 are done; 6–17 are candidates.
 5. **Automated tests** (done) — Vitest suite (`npm test`) covering the graph topology cases and
    the two simulation invariants from "Verifying changes here", plus `routing.ts` correctness and
    smoke tests for `geom.ts`/`simplify.ts`/`camera.ts`. See "Automated tests" below.
+6. **Congestion-aware routing** (done) — new trips are routed on per-lane travel time from the
+   congestion heat, reweighed every 5 s with damping. See "Congestion-aware routing" below.
 
 v0 deliberately left out multiple road types, one-ways, traffic lights, zoning and any economy,
 and roads are one lane per direction. Road types, junction tools and a budget are now candidates;
@@ -32,17 +34,11 @@ zoning is not.
 
 ### Candidate milestones
 
-None of 6–17 is started. Each begins only when picked, with its design questions settled then.
-Congestion-aware routing (6) is the recommended next step now that a test suite exists to catch
-it quietly breaking the junction invariants. Beyond that the list is grouped by theme, not
-ranked: problems the simulation exposed (6–8), costs and goals (9–11), feedback (12–14) and
-quality of life (15–17).
+None of 7–17 is started. Each begins only when picked, with its design questions settled then.
+Junction tools (7) is the suggested next step, since junctions are the capacity limit. The list
+is grouped by theme, not ranked: problems the simulation exposed (7–8), costs and goals (9–11),
+feedback (12–14) and quality of life (15–17).
 
-6. **Congestion-aware routing** — routes are static shortest-distance, so a new road carries every
-   trip it shortens and no other, whatever the traffic: a bypass drawn around a jam either stays
-   empty or inherits the whole jam. Route on travel time instead, using the per-lane speeds the
-   congestion overlay already smooths. Naive rerouting sends everyone onto the new road and then
-   back, so it needs damping, and the per-pair route cache has to expire.
 7. **Junction tools** — junctions are the capacity limit, about 3 s per vehicle, and drawing more
    road is the only fix today. Candidates: traffic lights, priority roads, roundabouts. Which of
    them, and how the player places one, is the first decision.
@@ -179,7 +175,7 @@ requires reproducible demand.
 ## Traffic simulation
 
 Each road becomes two directed lanes offset `LANE_OFFSET` to the right of the centreline, so
-vehicles drive on the right. Routing is plain Dijkstra on road length, cached per node pair.
+vehicles drive on the right. Routing is Dijkstra on per-lane travel time (see "Congestion-aware routing"), cached per node pair.
 Longitudinal movement is IDM car-following. `TrafficSim.sync` rebuilds only when
 `RoadGraph.version` changes, and keeps vehicles whose remaining route survived, so drawing a
 road does not wipe the traffic already on screen.
@@ -230,10 +226,30 @@ A junction still holds a movement for about 3 seconds per vehicle, which is the 
 limit of a network. Early versions sized demand to road length and saturated every junction;
 demand is now a rate that ramps in waves (see the feedback loop section).
 
-Routing is static shortest-distance, so all traffic funnels onto the same path and hotspots are
-sharper than in reality. That is arguably the right behaviour for a game about spotting
-bottlenecks, but it is a modelling choice, not an accident, and candidate milestone 6 proposes
-changing it.
+### Congestion-aware routing
+
+`Router` weights each *directed lane* by `length / (DESIRED_SPEED * heat)`, using the same
+`laneHeat` the overlay draws. `TrafficSim.updateRouteWeights` calls `Router.updateTravelTimes`
+every `ROUTE_REWEIGH_SECONDS` (5), which also clears the per-pair route cache. Until the first
+reweigh a lane weighs `length / DESIRED_SPEED`, which keeps plain shortest-distance ordering.
+Only *new* trips are affected; `Vehicle.route` is never changed once assigned.
+
+Two findings shaped it:
+
+- **Damping needs two layers.** A slow cadence alone still lets every trip admitted inside one
+  window pile onto the currently-best road. So each reweigh is also blended into the previous
+  weight on `ROUTE_WEIGHT_TIME_CONSTANT` (20 s); a lane that jams instantly takes about 4
+  reweighs (~20 s) before routes leave it.
+- **Floor heat before dividing (`MIN_ROUTING_HEAT`).** A fully jammed lane must weigh a large but
+  finite amount. With `Infinity`, `next < best` is `Infinity < Infinity`, false, so Dijkstra never
+  relaxes past the lane and reports a reachable destination as unreachable. The floor applies to
+  routing only; `laneHeat` and the overlay still reach 0.
+
+Measured with a throwaway two-route network (direct road with a contended mid junction, plus a
+longer detour): the detour carried no trips before and up to 9 vehicles after, growing
+monotonically with no oscillation, and arrivals were slightly higher (64 vs 61 before failure).
+The effect is modest when most demand does not use the contested pair. Lane heat only drops where
+a lane actually queues, so a network whose bottleneck is a shared junction sees no rerouting.
 
 
 ## Feedback loop
