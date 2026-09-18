@@ -7,7 +7,7 @@ not use feature branches, so there is no need to ask before editing files on `ma
 
 ## Scope and roadmap
 
-Milestones are built one at a time. 1–4 were the v0 prototype and are done; 5–17 are candidates.
+Milestones are built one at a time. 1–5 are done; 6–17 are candidates.
 
 1. **Drawing -> road graph** (done) — freehand strokes become a clean node/edge graph.
 2. **Traffic simulation** (done) — dead-end spawners, Dijkstra routing, IDM car-following,
@@ -15,6 +15,9 @@ Milestones are built one at a time. 1–4 were the v0 prototype and are done; 5�
 3. **Feedback loop** (done) — jam heatmap, flow and delay charts, demand that ramps in waves.
 4. **Minimal UI** (done) — toolbar, 1x/2x/4x speed, time frozen while drawing, wave
    countdown, best-wave record.
+5. **Automated tests** (done) — Vitest suite (`npm test`) covering the graph topology cases and
+   the two simulation invariants from "Verifying changes here", plus `routing.ts` correctness and
+   smoke tests for `geom.ts`/`simplify.ts`/`camera.ts`. See "Automated tests" below.
 
 v0 deliberately left out multiple road types, one-ways, traffic lights, zoning and any economy,
 and roads are one lane per direction. Road types, junction tools and a budget are now candidates;
@@ -22,17 +25,12 @@ zoning is not.
 
 ### Candidate milestones
 
-None is started. Each begins only when picked, with its design questions settled then. Tests (5)
-then congestion-aware routing (6) are the recommended next steps. Beyond that the list is grouped
-by theme, not ranked: problems the simulation exposed (6–8), costs and goals (9–11), feedback
-(12–14) and quality of life (15–17).
+None of 6–17 is started. Each begins only when picked, with its design questions settled then.
+Congestion-aware routing (6) is the recommended next step now that a test suite exists to catch
+it quietly breaking the junction invariants. Beyond that the list is grouped by theme, not
+ranked: problems the simulation exposed (6–8), costs and goals (9–11), feedback (12–14) and
+quality of life (15–17).
 
-5. **Automated tests** — there are none. Every check so far was run by hand in the console, and
-   each one caught a real bug. Turn the cases under "Verifying changes here" into a suite before
-   6, so routing changes cannot quietly break the junction invariants. Vitest fits the Vite
-   setup, and only `main.ts` touches the DOM, so graph and simulation can run headless. Trip ends
-   and driver speeds come from `Math.random`, so reproducible runs need a seeded source; 14 needs
-   one too.
 6. **Congestion-aware routing** — routes are static shortest-distance, so a new road carries every
    trip it shortens and no other, whatever the traffic: a bypass drawn around a jam either stays
    empty or inherits the whole jam. Route on travel time instead, using the per-lane speeds the
@@ -125,14 +123,50 @@ any change to junction or car-following logic, because both failed at some point
 implementation and neither is visible at a glance:
 
 - no two vehicles on one lane overlap (`leader.s - CAR_LENGTH - follower.s >= 0`);
-- the closest approach between any two vehicles stays at `2 * LANE_OFFSET`. This replaced an
-  earlier "one vehicle per junction box" check, which conflict points make meaningless — vehicles
-  are now *supposed* to share a junction. Minimum pairwise distance is the test that still means
-  something, and it is what caught the conflict/reality mismatch above.
+- the closest approach between any two vehicles never drops below `MOVEMENT_CLEARANCE`. This
+  replaced an earlier "one vehicle per junction box" check, which conflict points make
+  meaningless — vehicles are now *supposed* to share a junction. Minimum pairwise distance is the
+  test that still means something, and it is what caught the conflict/reality mismatch described
+  under "Conflict points" below. `2 * LANE_OFFSET` (the value originally measured here) is only
+  the floor for two vehicles on opposite lanes of the *same* road — a consequence of lane
+  geometry, not of the conflict check. `MOVEMENT_CLEARANCE` is deliberately set below
+  `2 * LANE_OFFSET` (see its comment in `config.ts`) precisely so that turning movements can be
+  marked compatible while closer together than that; measured on a 2x2 junction grid over 30
+  trials of 60 simulated seconds each (`src/traffic.test.ts`), straight-through pairs bottom out
+  at exactly `2 * LANE_OFFSET` (4m), turning pairs as low as ~3.54m, and nothing ever came close
+  to the true `MOVEMENT_CLEARANCE` (3m) floor.
 
 When measuring flow, watch whether **arrivals keep rising**. Falling average speed alone does not
 distinguish congestion from deadlock, but a network whose arrival count has stopped moving is
 deadlocked.
+
+## Automated tests
+
+`npm test` (Vitest, config in `vite.config.ts`) runs the suite under `src/*.test.ts`:
+
+- `graph.test.ts` — every case from "Verifying changes here" above (single road, X crossing, T
+  junction, endpoint weld, lasso, closed loop, erase-all, save/load round trip), built with
+  `addStroke` on plain 2-point strokes where possible so the exact resulting topology can be
+  hand-verified rather than merely observed.
+- `traffic.test.ts` — the two per-frame invariants above and an arrivals-keep-rising/no-deadlock
+  check, all driven with `sim.step(graph, C.SIM_STEP)` in a loop exactly as described under
+  "Driving the simulation in tests", against a fixed 2x2-junction grid built directly with
+  `addNode`/`addEdge` (not `addStroke`) so the topology is exact and untouched by the
+  simplify/smooth/weld pipeline.
+- `routing.test.ts` — Dijkstra correctness and cache invalidation on graph changes, which nothing
+  else exercises (a routing bug would silently manifest as "a vehicle took a longer route," not
+  as an invariant violation).
+- `geom.test.ts`, `simplify.test.ts`, `camera.test.ts` — one or two smoke tests each.
+
+`main.ts` is untested: it is the only file touching `document`/`window`, and its unconditional
+`Object.assign(window, { graph, cam, sim })` plus `requestAnimationFrame` loop with no teardown
+make it impractical to import under Vitest. The console-driven workflow above remains the way to
+poke at a *running* game; the suite is for regression-checking the invariants mechanically.
+
+No seeded RNG was introduced for this. `Math.random()` stays as-is in `traffic.ts`'s
+`requestTrip` — the invariant tests hold for any random sequence given a long enough run, so they
+need no seeding. A real seeded-PRNG abstraction is deferred to milestone 14, which actually
+requires reproducible demand.
 
 
 ## Traffic simulation
@@ -181,8 +215,9 @@ Two things make this work, and both were found by measurement rather than reason
   2m. Movement paths are now quadratic beziers whose control point is where the two lane tangents
   meet (the natural corner of the turn, which keeps the curve off the node), and `poseOf` places
   vehicles along that same curve while crossing. Closest approach then measured exactly
-  `2 * LANE_OFFSET`, the geometric minimum, and the lane-end jump at turns disappeared as a side
-  effect.
+  `2 * LANE_OFFSET` for the opposite-straight-through case tested at the time, and the lane-end
+  jump at turns disappeared as a side effect. That figure is specific to same-road opposite
+  lanes, not a general bound — see the corrected note under "Verifying changes here".
 
 A junction still holds a movement for about 3 seconds per vehicle, which is the real capacity
 limit of a network. Early versions sized demand to road length and saturated every junction;
