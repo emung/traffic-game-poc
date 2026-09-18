@@ -164,6 +164,7 @@ deadlocked.
   else exercises (a routing bug would silently manifest as "a vehicle took a longer route," not
   as an invariant violation).
 - `geom.test.ts`, `simplify.test.ts`, `camera.test.ts` — one or two smoke tests each.
+- Sharp junctions: `buildBranch(degrees, control)` in `testutil.ts`; see "Sharp junctions".
 
 `main.ts` is untested: it is the only file touching `document`/`window`, and its unconditional
 `Object.assign(window, { graph, cam, sim })` plus `requestAnimationFrame` loop with no teardown
@@ -361,10 +362,10 @@ signals use a fixed cycle. Plan file: `~/.claude/plans/start-with-the-planning-p
   `LaneNetwork.ringPath` builds each movement as lane -> ring -> anticlockwise arc (decreasing
   angle, since screen y points down) -> exit lane, Chaikin-smoothed. Rendered as a ring road with an
   island. U-turns (same edge) keep a plain chord and the static conflict rule.
-  - **Per-node zone and per-movement span (applies to every junction, no behaviour change for
-    plain).** `Movement.zone` is the node's box radius; `Movement.span` is how far a vehicle
-    travels through the box: `2 * zone` for plain (sampled by fraction, as before), the true path
-    length for a roundabout. On changing lane `advanceLegs` subtracts `span - 2 * zone`, so a car's
+  - **Per-node zone and per-movement span (applies to every junction).** `Movement.zone` is the
+    node's box radius; `Movement.span` is how far a vehicle travels through the box: the true path
+    length. (It was `2 * zone` for non-roundabouts until the sharp-junction fix; see "Sharp
+    junctions".) On changing lane `advanceLegs` subtracts `span - 2 * zone`, so a car's
     real position along its path stays continuous; the price is that a vehicle in the box can have
     a *negative* `s` on the exit lane (a virtual coordinate), and `computeAccelerations` adds the
     same shift to the gap to a leader on the next lane. Without it cars sped up on long arcs and
@@ -512,9 +513,14 @@ the ground), a ground stroke's end never welds to a bridge mid-span.
   null if the bridge is too short for both ramps). Every level question goes through it:
   crossings split only where both roads are at the same level at that point (so a road crossing a
   ramp gets a junction), `edgeNear(..., groundOnly)` skips elevated points, `Lane.elevated` is the
-  same span in lane coordinates, and `TrafficSim.levelOf(v)` reads it. `RAMP_LENGTH` must stay >=
-  the biggest junction box (`ROUNDABOUT_ZONE`) so a car in a ramp's box is on the ground, and <
-  `SNAP_RADIUS` so an end landing on a ramp welds to the ramp node.
+  same span in lane coordinates, and `TrafficSim.levelOf(v)` reads it. A ramp is
+  `RoadGraph.rampLength(node)` = max(`RAMP_LENGTH`, that junction's box), so a car in a ramp's
+  box is always on the ground; the box grows at sharp junctions (see "Sharp junctions"), and so
+  does the ramp. `RAMP_LENGTH` stays < `SNAP_RADIUS` so an end landing on a short ramp welds to the
+  ramp node. Residual: ramp length depends on the junction's angles, so a later road that makes a
+  ramp junction sharper lengthens the ramp and can pull an existing no-node crossing onto it (a
+  crossing then at ground level with no junction). Needs a crossing 12+ m from a ramp junction
+  sharper than ~34 degrees; not handled.
 - **Stroke pieces carry `rampA`/`rampB`** while `addStroke` works its queue, because a piece's end
   level is not yet visible in the graph: an end welded onto a node whose roads are all bridges
   *becomes* elevated once this bridge joins, and a self-crossing node has no roads yet.
@@ -523,14 +529,53 @@ the ground), a ground stroke's end never welds to a bridge mid-span.
   Erase prefers a bridge where it is over a road.
 - **Simulation is unchanged**: a bridge adds no node where it crosses. The clearance invariant
   skips pairs with different `levelOf`.
-- **Shallow-angle finding (not bridge-specific, not fixed).** The first flyover fixture was a
-  straight diagonal meeting the stubs at ~27 degrees and failed the clearance invariant near a
-  ramp. Same rate (4-5 of 20 trials) with the bridge flag removed: roads meeting at a shallow
-  angle bring their lanes within ~2 m outside the junction box, where nothing arbitrates. The
-  2x2 grid (all right angles) never showed it. The fixture now uses square ramps.
+- **Shallow-angle finding (not bridge-specific; fixed since, see "Sharp junctions").** The first
+  flyover fixture was a straight diagonal meeting the stubs at ~27 degrees and failed the
+  clearance invariant near a ramp, at the same rate with the bridge flag removed. The fixture
+  still uses square ramps.
 - **Verified**: 0 violations in 160 trials of 90 s (4 controls, flyover). Mutation-checked:
   removing the level check in `firstCrossing` fails 4 graph tests; removing the clearance
   exemption fails the random flyover runs only sometimes (bridge traffic is sparse), so the
   deterministic "car on the bridge and a car below it at one spot" test is the real guard.
 - **Disconnected bridges carry almost no traffic**: a bridge between two fresh dead ends is its
   own component and `requestTrip` drops trips between components (see milestone 10).
+
+## Sharp junctions (fixed 2026-09-18)
+
+Found while building bridges, then fixed with the owner's choices (angle-aware box, ramps that
+grow with it). Measured on `buildBranch(degrees, control)` (src/testutil.ts: a straight road with a
+branch leaving its east arm at `degrees`), 20 trials of 60 s: before, every trial failed the
+clearance invariant at 15-45 degrees (closest 0.02-0.5 m) and 6 in 20 at 60; right angles were
+clean, which is why the 2x2 grid never showed it. Two causes, both found by classifying each
+violating pair (both holding a movement? from the same approach?):
+
+- **Lanes of neighbouring roads overlap beyond the box.** Two roads leaving a node at angle `a`
+  have facing lanes `2 (d sin(a/2) - LANE_OFFSET cos(a/2))` apart `d` out, so they only clear
+  `MOVEMENT_CLEARANCE` at `(C/2 + w cos(a/2)) / sin(a/2)`: 4.1 m at 90, 8.8 m at 45, 14.7 m at 27.
+  With a fixed 5 m box a car at a 45-degree stop line stood in the next road's lane. Fix:
+  `RoadGraph.junctionZone(node)` sizes each junction's box from its sharpest pair of roads (capped
+  at `JUNCTION_ZONE_ROAD_FRACTION` 0.45 of the shortest road, floor `JUNCTION_RADIUS`);
+  `LaneNetwork.zoneOf` uses it (a roundabout takes the larger of its own and this). Stop lines are
+  drawn at the box edge.
+- **A sharp turn's path is much shorter than the box, and the car's pose lagged it.** Plain
+  movements used `span = 2 * zone` and placed the car along the curve by that fraction; a
+  45-degree hairpin's curve is ~7 m against 17.5 m of "travel", so the turning car barely moved on
+  screen while the car behind, gapped correctly *in s*, ran into it (these were all "same
+  approach" pairs, which never conflict by design). Fix: `span` is the true path length at every
+  junction (roundabouts already did this; the virtual exit-lane shift handles the rest). Where
+  the path is shorter even than the box's approach half (about 20 degrees and sharper), a car has
+  covered the path before it reaches the node; `poseOf` now carries it on along the exit lane
+  instead of freezing it at the path end and then jumping ~11 m.
+- **Tried and dropped: following a same-approach leader through the box** (the owner had picked
+  it, on my first diagnosis). With the span fix in, disabling it changed nothing measurable, so
+  it was removed rather than kept untested.
+
+After: 0 of 20 trials fail for plain, signal and priority from 20 degrees up, and roundabouts from
+35 up; throughput at sharp junctions equal or higher. 2x2 grid unchanged within noise (8 x 300 s:
+plain 235 -> 240 arrivals, signal 274 -> 272, priority 296 -> 299, roundabout 258 -> 265).
+**Known limits:** every type still fails at 15 degrees and below (10 degrees needs a ~40 m box;
+two roads that close are nearly on top of each other), and roundabouts at ~27 degrees and below
+("one holds" pairs around the ring, not investigated). A drawing-time minimum angle was the option
+not taken for these. Tests: "a sharp junction" in `traffic.test.ts` (27 and 45 degrees, also a
+no-jump check on poses), "junction box" in `graph.test.ts`; each of the three fixes was
+mutation-checked (reverting any one fails 7-10 tests).

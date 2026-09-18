@@ -323,7 +323,7 @@ function drawSignals(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGrap
     for (const laneId of phases.flat()) {
       const lane = sim.network.lanes.get(laneId);
       if (!lane) continue;
-      const pose = sim.network.sample(lane, lane.length - JUNCTION_RADIUS);
+      const pose = sim.network.sample(lane, lane.length - sim.network.zoneOf(lane.to));
       const half = ROAD_WIDTH / 4;
       ctx.strokeStyle = HEAD_COLORS[sim.signalState(node, laneId) ?? 'red'];
       ctx.beginPath();
@@ -344,7 +344,7 @@ function drawYields(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGraph
     if (nodeLevel(graph, node) !== level) continue;
     for (const lane of sim.network.lanes.values()) {
       if (lane.to !== node || major.has(lane.id)) continue;
-      const pose = sim.network.sample(lane, lane.length - JUNCTION_RADIUS);
+      const pose = sim.network.sample(lane, lane.length - sim.network.zoneOf(lane.to));
       const half = ROAD_WIDTH / 4;
       ctx.beginPath();
       ctx.moveTo(pose.pos.x - pose.dir.y * half, pose.pos.y + pose.dir.x * half);

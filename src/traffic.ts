@@ -712,7 +712,15 @@ export class TrafficSim {
     if (next) {
       const zone = this.network.zoneOf(lane.to);
       const movement = remaining < zone ? this.network.movementFor(lane.id, next.id) : undefined;
-      if (movement) return samplePolyline(movement.path, (zone - remaining) / movement.span);
+      if (movement) {
+        const travelled = zone - remaining;
+        if (travelled <= movement.span) return samplePolyline(movement.path, travelled / movement.span);
+        // A sharp turn's path can be shorter than the box's approach half, so the vehicle has
+        // covered all of it before it reaches the node and changes lane. It carries on along the
+        // exit lane, which is where its exit-lane coordinate (`2 * zone - span` at the change) puts
+        // it; without this it froze at the end of the path and then jumped ahead.
+        return this.network.sample(next, zone + travelled - movement.span);
+      }
     }
 
     if (v.leg > 0 && v.s < this.network.zoneOf(lane.from)) {

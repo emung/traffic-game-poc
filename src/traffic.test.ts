@@ -5,7 +5,7 @@ import { Router } from './routing';
 import { arcLengthAt, closestOnPolyline } from './geom';
 import { TrafficSim, type Vehicle } from './traffic';
 import * as C from './config';
-import { FLYOVER_CROSSINGS, buildGrid } from './testutil';
+import { FLYOVER_CROSSINGS, buildBranch, buildGrid } from './testutil';
 
 /** Every control type is held to the same invariants as a plain junction. `null` is plain. */
 const CONTROLS: Array<JunctionControl | null> = [null, 'signal', 'priority', 'roundabout'];
@@ -160,6 +160,53 @@ describe('TrafficSim', () => {
     expect(sim.stats().arrivals).toBeGreaterThan(0);
     expect(sim.failed).toBe(false);
   });
+  // Two roads meeting at a sharp angle have lanes that run close together well beyond a fixed 5 m
+  // box, and a sharp turn's path is far shorter than the box. Measured on this fixture before the
+  // fix: at 45 degrees every trial failed (closest 0.4 m), at 60 degrees 6 in 20.
+  describe.each([
+    ...[27, 45].flatMap((degrees) => (['plain', 'signal', 'priority'] as const).map((c) => ({ degrees, control: c }))),
+    { degrees: 45, control: 'roundabout' as const },
+  ])('a sharp junction ($degrees degrees, control: $control)', ({ degrees, control }) => {
+    it('keeps every pair of vehicles at least MOVEMENT_CLEARANCE apart, and none jumps', () => {
+      const graph = buildBranch(degrees, control === 'plain' ? null : control);
+      const sim = new TrafficSim();
+      sim.running = true;
+      let turns = 0;
+      const last = new Map<number, Pose>();
+
+      for (let i = 0; i < Math.round(120 / C.SIM_STEP); i++) {
+        sim.step(graph, C.SIM_STEP);
+        const poses = posesOf(sim);
+        for (const { veh, pose } of poses) {
+          // A car moves at most its speed per step, plus a little for curvature and braking.
+          const prev = last.get(veh.id);
+          if (prev) {
+            const moved = Math.hypot(pose.pos.x - prev.pos.x, pose.pos.y - prev.pos.y);
+            if (moved > (veh.v + C.MAX_ACCEL * C.SIM_STEP) * C.SIM_STEP * 1.5 + 0.05) {
+              throw new Error(`jump at t=${sim.time.toFixed(3)}s of ${moved.toFixed(2)}m: ${vehicleSummary(poses.find((p) => p.veh === veh)!)}`);
+            }
+          }
+          last.set(veh.id, pose);
+          // The branch (node 4) to the east arm (node 3) is the sharp turn.
+          const lane = sim.network.lanes.get(veh.route[veh.leg])!;
+          if (lane.from === 1 && lane.to === 3 && veh.leg > 0 && sim.network.lanes.get(veh.route[veh.leg - 1])!.from === 4) turns++;
+        }
+        for (let a = 0; a < poses.length; a++) {
+          for (let b = a + 1; b < poses.length; b++) {
+            const d = Math.hypot(poses[a].pose.pos.x - poses[b].pose.pos.x, poses[a].pose.pos.y - poses[b].pose.pos.y);
+            if (d < C.MOVEMENT_CLEARANCE - 1e-2) {
+              throw new Error(
+                `closest-approach violation at t=${sim.time.toFixed(3)}s, ${d.toFixed(3)}m apart; ` +
+                  [poses[a], poses[b]].map(vehicleSummary).join('; '),
+              );
+            }
+          }
+        }
+      }
+      expect(turns).toBeGreaterThan(0);
+    });
+  });
+
   describe('bridges', () => {
     it('puts no junction where the flyover crosses the grid', () => {
       const graph = buildGrid(null, { flyover: true });

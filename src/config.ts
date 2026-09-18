@@ -9,12 +9,19 @@ export const SNAP_RADIUS = 14;
 export const MERGE_DIST = 5;
 export const MIN_ROAD_LENGTH = 12;
 /**
- * How much of a bridge, from each end that meets the ground, is a ramp at ground level; the rest
- * is the elevated span. At least the largest junction box (ROUNDABOUT_ZONE), so a junction box at
- * a ramp is always on the ground, and below SNAP_RADIUS, so a stroke end landing on a ramp welds
- * to the ramp's node rather than splitting the ramp.
+ * How much of a bridge, at least, from each end that meets the ground, is a ramp at ground level;
+ * the rest is the elevated span. A ramp is never shorter than the junction box at its end (see
+ * `RoadGraph.rampLength`), so a car in that box is always on the ground. This minimum covers a
+ * roundabout's box (ROUNDABOUT_ZONE) and stays below SNAP_RADIUS, so a stroke end landing on a
+ * short ramp welds to the ramp's node rather than splitting the ramp.
  */
 export const RAMP_LENGTH = 12;
+/**
+ * A junction's box never reaches further than this share of its shortest road, so the boxes of
+ * two junctions joined by a short road do not overlap. Applies to the angle-sized box of every
+ * junction and to a roundabout's.
+ */
+export const JUNCTION_ZONE_ROAD_FRACTION = 0.45;
 /** Minimum screen-space spacing between captured stroke samples. */
 export const SAMPLE_SPACING_PX = 3;
 export const UNDO_LIMIT = 50;

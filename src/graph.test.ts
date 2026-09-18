@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { RoadGraph } from './graph';
-import { RAMP_LENGTH } from './config';
+import { JUNCTION_RADIUS, RAMP_LENGTH } from './config';
+import { buildBranch } from './testutil';
 
 /** Every edge's geometry must be exactly incident to its endpoint nodes, never merely near them. */
 function assertWelded(graph: RoadGraph): void {
@@ -10,6 +11,14 @@ function assertWelded(graph: RoadGraph): void {
     expect(edge.points[0]).toEqual(a.pos);
     expect(edge.points[edge.points.length - 1]).toEqual(b.pos);
   }
+}
+
+/** A two-point stroke. */
+function line(x0: number, y0: number, x1: number, y1: number) {
+  return [
+    { x: x0, y: y0 },
+    { x: x1, y: y1 },
+  ];
 }
 
 function degreeHistogram(graph: RoadGraph): number[] {
@@ -262,10 +271,6 @@ describe('junction control', () => {
 });
 
 describe('bridges', () => {
-  const line = (x0: number, y0: number, x1: number, y1: number) => [
-    { x: x0, y: y0 },
-    { x: x1, y: y1 },
-  ];
   const bridgeOf = (graph: RoadGraph) => [...graph.edges.values()].filter((e) => e.bridge);
   const groundOf = (graph: RoadGraph) => [...graph.edges.values()].filter((e) => !e.bridge);
 
@@ -421,5 +426,53 @@ describe('bridges', () => {
     legacy.loadJSON(JSON.stringify(old));
     expect(bridgeOf(legacy)).toHaveLength(0);
     expect(legacy.edges.size).toBe(2);
+  });
+});
+
+describe('junction box', () => {
+  /** The reach the box needs at `degrees`: where two facing lanes are MOVEMENT_CLEARANCE apart. */
+  const need = (degrees: number) => {
+    const half = (degrees * Math.PI) / 360;
+    return (3 / 2 + 2 * Math.cos(half)) / Math.sin(half);
+  };
+
+  it('stays at the junction radius where roads meet square, and at a dead end', () => {
+    const graph = buildBranch(90);
+    expect(graph.junctionZone(1)).toBe(JUNCTION_RADIUS);
+    expect(graph.junctionZone(2)).toBe(JUNCTION_RADIUS);
+  });
+
+  it('reaches out as far as the sharpest pair of roads needs', () => {
+    expect(buildBranch(45).junctionZone(1)).toBeCloseTo(need(45), 1);
+    expect(buildBranch(27).junctionZone(1)).toBeCloseTo(need(27), 1);
+    expect(need(45)).toBeGreaterThan(8);
+  });
+
+  it('never reaches past 45% of its shortest road', () => {
+    const graph = new RoadGraph();
+    const c = graph.addNode({ x: 0, y: 0 });
+    for (const [x, y] of [
+      [-100, 0],
+      [100, 0],
+      [20 * Math.cos(Math.PI / 6), 20 * Math.sin(Math.PI / 6)],
+    ]) {
+      const n = graph.addNode({ x, y });
+      graph.addEdge(c.id, n.id, [{ ...c.pos }, { ...n.pos }]);
+    }
+    expect(graph.junctionZone(c.id)).toBeCloseTo(9, 5);
+  });
+
+  it('makes a ramp at least as long as the box at its end', () => {
+    // A bridge landing at 27 degrees onto a road: that junction's box reaches ~14.7 m.
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 0, 200, 0));
+    const a = (27 * Math.PI) / 180;
+    graph.addStroke(line(100 + 150 * Math.cos(a), -150 * Math.sin(a), 100, 0), { bridge: true });
+    const deck = [...graph.edges.values()].find((e) => e.bridge)!;
+    const ramp = graph.nodes.get(deck.a)!.edges.length === 3 ? deck.a : deck.b;
+    expect(graph.rampLength(ramp)).toBeCloseTo(need(27), 1);
+    const span = graph.elevatedRange(deck)!;
+    if (ramp === deck.b) expect(graph.edgeLength(deck) - span.hi).toBeCloseTo(need(27), 1);
+    else expect(span.lo).toBeCloseTo(need(27), 1);
   });
 });

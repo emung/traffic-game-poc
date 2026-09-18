@@ -13,9 +13,9 @@ import {
 import { type JunctionControl, type RoadGraph, type Span } from './graph';
 import {
   JUNCTION_RADIUS,
+  JUNCTION_ZONE_ROAD_FRACTION,
   LANE_OFFSET,
   MOVEMENT_CLEARANCE,
-  RAMP_LENGTH,
   ROUNDABOUT_RING_FRACTION,
   ROUNDABOUT_ZONE,
 } from './config';
@@ -127,6 +127,8 @@ export class LaneNetwork {
   readonly majorLanes = new Map<number, Set<number>>();
   /** Roundabout node id -> the radius of its box (where vehicles enter and leave the ring). */
   private readonly roundaboutZones = new Map<number, number>();
+  /** Node id -> box reach where the angles between its roads need more than JUNCTION_RADIUS. */
+  private readonly junctionZones = new Map<number, number>();
   /** Junctions (three or more roads) with no control: vehicles slow down through these. */
   readonly plainJunctions = new Set<number>();
   /** Priority node id -> the player's chosen major-road bearing, when there is one. */
@@ -145,6 +147,7 @@ export class LaneNetwork {
     this.majorLanes.clear();
     this.plainJunctions.clear();
     this.roundaboutZones.clear();
+    this.junctionZones.clear();
     this.majorBearings.clear();
     this.deadEnds = [];
     this.totalLength = 0;
@@ -155,16 +158,16 @@ export class LaneNetwork {
       const span = graph.elevatedRange(edge);
       if (span) {
         // Ramps are measured on each lane itself, not scaled from the centreline, so a ramp is
-        // exactly RAMP_LENGTH on every lane and always covers the junction box at its end.
-        const rampA = Number.isFinite(span.lo);
-        const rampB = Number.isFinite(span.hi);
+        // exactly `rampLength` on every lane and always covers the junction box at its end.
+        const rampA = Number.isFinite(span.lo) ? graph.rampLength(edge.a) : null;
+        const rampB = Number.isFinite(span.hi) ? graph.rampLength(edge.b) : null;
         forward.elevated = {
-          lo: rampA ? RAMP_LENGTH : -Infinity,
-          hi: rampB ? forward.length - RAMP_LENGTH : Infinity,
+          lo: rampA ?? -Infinity,
+          hi: rampB === null ? Infinity : forward.length - rampB,
         };
         backward.elevated = {
-          lo: rampB ? RAMP_LENGTH : -Infinity,
-          hi: rampA ? backward.length - RAMP_LENGTH : Infinity,
+          lo: rampB ?? -Infinity,
+          hi: rampA === null ? Infinity : backward.length - rampA,
         };
       }
       for (const lane of [forward, backward]) {
@@ -178,6 +181,10 @@ export class LaneNetwork {
     }
 
     for (const node of graph.nodes.values()) {
+      if (node.edges.length >= 2) {
+        const zone = graph.junctionZone(node.id);
+        if (zone > JUNCTION_RADIUS) this.junctionZones.set(node.id, zone);
+      }
       if (node.edges.length === 1) this.deadEnds.push(node.id);
       // A control on a node that lost roads keeps its value in the graph but does nothing here.
       if (node.control && node.edges.length >= 3) {
@@ -232,7 +239,7 @@ export class LaneNetwork {
       for (const m of list) {
         m.path = this.movementPath(m.inLane, m.outLane, node, centre);
         const round = this.controls.get(node) === 'roundabout';
-        m.span = round ? polylineLength(m.path) : 2 * m.zone;
+        m.span = polylineLength(m.path);
         if (round) m.ring = this.ringOf(m, centre);
       }
 
@@ -459,8 +466,12 @@ export class LaneNetwork {
   }
 
   /** Radius of a node's box: a roundabout's own, else the plain junction radius. */
+  /**
+   * How far the node's box reaches along each road: a roundabout's own size, otherwise what the
+   * angles between its roads need (`RoadGraph.junctionZone`), at least JUNCTION_RADIUS.
+   */
   zoneOf(node: number): number {
-    return this.roundaboutZones.get(node) ?? JUNCTION_RADIUS;
+    return this.roundaboutZones.get(node) ?? this.junctionZones.get(node) ?? JUNCTION_RADIUS;
   }
 
   /**
@@ -491,7 +502,9 @@ export class LaneNetwork {
       for (const lane of this.lanes.values()) {
         if (lane.to === node || lane.from === node) shortest = Math.min(shortest, lane.length);
       }
-      this.roundaboutZones.set(node, Math.max(JUNCTION_RADIUS, Math.min(ROUNDABOUT_ZONE, shortest * 0.45)));
+      const zone = Math.max(JUNCTION_RADIUS, Math.min(ROUNDABOUT_ZONE, shortest * JUNCTION_ZONE_ROAD_FRACTION));
+      // A roundabout at a sharp junction still needs the box its angles do.
+      this.roundaboutZones.set(node, Math.max(zone, this.junctionZones.get(node) ?? 0));
     }
   }
 

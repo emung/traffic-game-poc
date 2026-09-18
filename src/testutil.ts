@@ -65,3 +65,22 @@ export function buildGrid(control: JunctionControl | null = null, opts: { flyove
   if (control) for (const j of [j1, j2, j3, j4]) graph.setControl(j.id, control);
   return graph;
 }
+
+/**
+ * A junction where a branch leaves a straight road at `degrees` to its east arm: node 1 is the
+ * junction, 2 the west end, 3 the east end, 4 the branch end, every road 150 m. At a sharp angle
+ * the lanes of the branch and the east arm run close together well beyond a fixed 5 m box.
+ */
+export function buildBranch(degrees: number, control: JunctionControl | null = null): RoadGraph {
+  const graph = new RoadGraph();
+  const c = graph.addNode({ x: 0, y: 0 });
+  const a = (degrees * Math.PI) / 180;
+  const ends = [
+    graph.addNode({ x: -150, y: 0 }),
+    graph.addNode({ x: 150, y: 0 }),
+    graph.addNode({ x: 150 * Math.cos(a), y: 150 * Math.sin(a) }),
+  ];
+  for (const end of ends) graph.addEdge(c.id, end.id, [{ ...c.pos }, { ...end.pos }]);
+  if (control) graph.setControl(c.id, control);
+  return graph;
+}

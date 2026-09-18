@@ -3,6 +3,9 @@ import {
   clone,
   dist,
   lerp,
+  normalize,
+  slicePolyline,
+  sub,
   arcLengthAt,
   closestOnPolyline,
   polylineLength,
@@ -10,7 +13,18 @@ import {
   splitPolyline,
 } from './geom';
 import { simplify, smooth, nudgeEndpoint } from './simplify';
-import { MERGE_DIST, MIN_ROAD_LENGTH, RAMP_LENGTH, SIMPLIFY_EPS, SMOOTH_PASSES, SNAP_RADIUS } from './config';
+import {
+  JUNCTION_RADIUS,
+  JUNCTION_ZONE_ROAD_FRACTION,
+  LANE_OFFSET,
+  MERGE_DIST,
+  MIN_ROAD_LENGTH,
+  MOVEMENT_CLEARANCE,
+  RAMP_LENGTH,
+  SIMPLIFY_EPS,
+  SMOOTH_PASSES,
+  SNAP_RADIUS,
+} from './config';
 
 export type JunctionControl = 'signal' | 'priority' | 'roundabout';
 
@@ -64,6 +78,38 @@ export interface EdgeHit {
   dist: number;
 }
 
+/**
+ * How far out from a node the junction box must reach so that, beyond it, the lanes of any two of
+ * its roads are at least MOVEMENT_CLEARANCE apart. Two roads leaving at angle `a` each have a lane
+ * LANE_OFFSET towards the other, and those lanes are `2 * (d sin(a/2) - LANE_OFFSET cos(a/2))`
+ * apart `d` out, so the box reaches `(MOVEMENT_CLEARANCE / 2 + LANE_OFFSET cos(a/2)) / sin(a/2)`:
+ * 4.1 m at a right angle (so JUNCTION_RADIUS), 8.8 m at 45 degrees, 14.7 m at 27. Inside the box
+ * the junction's claims keep cars apart; outside it nothing does, so a fixed 5 m box let cars at a
+ * sharp junction stand in each other's lanes. Capped at JUNCTION_ZONE_ROAD_FRACTION of the shortest
+ * road (so sharper junctions on short roads still overlap a little), never below JUNCTION_RADIUS.
+ */
+function zoneFor(departures: Vec2[], shortest: number): number {
+  let sharpest = Math.PI;
+  for (let i = 0; i < departures.length; i++) {
+    for (let j = i + 1; j < departures.length; j++) {
+      const cos = departures[i].x * departures[j].x + departures[i].y * departures[j].y;
+      sharpest = Math.min(sharpest, Math.acos(Math.max(-1, Math.min(1, cos))));
+    }
+  }
+  const half = Math.max(sharpest / 2, 1e-3);
+  const need = (MOVEMENT_CLEARANCE / 2 + LANE_OFFSET * Math.cos(half)) / Math.sin(half);
+  return Math.max(JUNCTION_RADIUS, Math.min(need, shortest * JUNCTION_ZONE_ROAD_FRACTION));
+}
+
+/**
+ * The direction a polyline leaves its first point in, taken a junction radius out (or halfway
+ * along a short one) so a freehand wiggle at the very end does not decide it.
+ */
+function departure(pts: Vec2[], length: number): Vec2 {
+  const out = slicePolyline(pts, 0, Math.min(JUNCTION_RADIUS, length / 2));
+  return normalize(sub(out[out.length - 1], pts[0]));
+}
+
 function unlink(node: RoadNode | undefined, edgeId: number): void {
   if (!node) return;
   const i = node.edges.indexOf(edgeId);
@@ -105,6 +151,9 @@ export class RoadGraph {
   version = 0;
   /** Edge geometry never changes after creation, so lengths are cached per edge object. */
   private readonly lengths = new WeakMap<RoadEdge, number>();
+  /** Junction boxes by node, valid for `zonesVersion`; any change to the graph can alter them. */
+  private readonly zones = new Map<number, number>();
+  private zonesVersion = -1;
 
   addNode(pos: Vec2): RoadNode {
     const node: RoadNode = { id: this.nextNode++, pos: clone(pos), edges: [] };
@@ -189,16 +238,60 @@ export class RoadGraph {
   }
 
   /**
+   * How far the junction box at a node reaches along each of its roads: sized from the sharpest
+   * angle between them (see `zoneFor`). JUNCTION_RADIUS at a dead end. `extra` is a road about to
+   * join the node, given as the polyline leaving it, so a stroke can size a ramp before its edge
+   * exists.
+   */
+  junctionZone(id: number, extra?: Vec2[]): number {
+    if (!extra) {
+      if (this.zonesVersion !== this.version) {
+        this.zones.clear();
+        this.zonesVersion = this.version;
+      }
+      const cached = this.zones.get(id);
+      if (cached !== undefined) return cached;
+    }
+    const node = this.nodes.get(id);
+    if (!node) return JUNCTION_RADIUS;
+    const departures: Vec2[] = [];
+    let shortest = Infinity;
+    // A self-loop is listed twice and leaves the node from both of its ends.
+    const loopsSeen = new Set<number>();
+    for (const edgeId of node.edges) {
+      const edge = this.edges.get(edgeId)!;
+      const length = this.edgeLength(edge);
+      const fromA = edge.a === id && !(edge.b === id && loopsSeen.has(edgeId));
+      if (edge.a === id && edge.b === id) loopsSeen.add(edgeId);
+      departures.push(departure(fromA ? edge.points : [...edge.points].reverse(), length));
+      shortest = Math.min(shortest, length);
+    }
+    if (extra) {
+      const length = polylineLength(extra);
+      departures.push(departure(extra, length));
+      shortest = Math.min(shortest, length);
+    }
+    const zone = departures.length < 2 ? JUNCTION_RADIUS : zoneFor(departures, shortest);
+    if (!extra) this.zones.set(id, zone);
+    return zone;
+  }
+
+  /** How long a bridge's ramp down to a ground node is: at least RAMP_LENGTH, and the whole box. */
+  rampLength(id: number, extra?: Vec2[]): number {
+    return Math.max(RAMP_LENGTH, this.junctionZone(id, extra));
+  }
+
+  /**
    * Where along an edge (arc length from `a`) it is elevated, or null if nowhere. Each end that
-   * meets the ground has a RAMP_LENGTH ramp at ground level; an end at an elevated node has none,
+   * meets the ground has a ramp at ground level (`rampLength`); an end at an elevated node has none,
    * so the span runs all the way to it (an infinite bound, which also covers the virtual negative
    * positions of vehicles in that node's box). A bridge too short for its ramps is all ground.
    */
   elevatedRange(edge: RoadEdge): Span | null {
     if (!edge.bridge) return null;
     const length = this.edgeLength(edge);
-    const lo = this.isElevatedNode(edge.a) ? -Infinity : RAMP_LENGTH;
-    const hi = this.isElevatedNode(edge.b) ? Infinity : length - RAMP_LENGTH;
+    const lo = this.isElevatedNode(edge.a) ? -Infinity : this.rampLength(edge.a);
+    const hi = this.isElevatedNode(edge.b) ? Infinity : length - this.rampLength(edge.b);
     return Math.max(lo, 0) < Math.min(hi, length) ? { lo, hi } : null;
   }
 
@@ -310,12 +403,13 @@ export class RoadGraph {
 
   /**
    * Whether a piece of a stroke is elevated `s` along it, by the same rule as `elevatedRange`:
-   * ramps at the ends that meet the ground, too short for both ramps means all ground.
+   * ramps at the ends that meet the ground, too short for both ramps means all ground. Each ramp is
+   * sized for its junction with this piece already joined to it.
    */
   private pieceElevatedAt(piece: Piece, bridge: boolean, s: number, total: number): boolean {
     if (!bridge) return false;
-    const lo = piece.rampA ? RAMP_LENGTH : -Infinity;
-    const hi = piece.rampB ? total - RAMP_LENGTH : Infinity;
+    const lo = piece.rampA ? this.rampLength(piece.a, piece.pts) : -Infinity;
+    const hi = piece.rampB ? total - this.rampLength(piece.b, [...piece.pts].reverse()) : Infinity;
     return Math.max(lo, 0) < Math.min(hi, total) && s > lo && s < hi;
   }
 

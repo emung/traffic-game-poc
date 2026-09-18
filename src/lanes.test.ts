@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { RoadGraph } from './graph';
 import { LaneNetwork } from './lanes';
+import { polylineLength } from './geom';
 import { buildGrid } from './testutil';
 
 /** A T: a west-east road with a stem to the south. Node ids: 1 centre, 2 west, 3 east, 4 south. */
@@ -242,9 +243,10 @@ describe('roundabout', () => {
     const left = network.movementFor(west.id, laneTo(network, 4).id)!;
     expect(right.span).toBeLessThan(straight.span);
     expect(straight.span).toBeLessThan(left.span);
-    // A plain junction keeps the old fixed span.
+    // So does every other junction: a sharp turn's curve is much shorter than 2 x zone, and a car
+    // placed along it by that fraction lags behind its own position, so the car behind runs into it.
     const plain = build(tJunction(null));
-    for (const list of plain.movements.values()) for (const m of list) expect(m.span).toBe(2 * m.zone);
+    for (const list of plain.movements.values()) for (const m of list) expect(m.span).toBeCloseTo(polylineLength(m.path));
   });
 
   it('lets arrivals from opposite sides pass at once only when their arcs are apart', () => {
