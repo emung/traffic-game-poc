@@ -34,22 +34,34 @@ ground network at their ends, and routing and lanes need one graph).
   bridge welded mid-span onto another bridge. Every other node is ground: a bridge's end that
   meets a ground road (a ramp), and a bridge's dead end (degree 1), which is a ramp to nowhere and
   is where traffic enters and leaves.
+- **Ramps are the ends of a bridge edge.** The first and last `RAMP_LENGTH` (new constant in
+  `config.ts`, 12 m: at least the largest junction box, `ROUNDABOUT_ZONE`, and below
+  `SNAP_RADIUS`) of arc length along a bridge edge, measured from an end at a *ground* node, are
+  at ground level. Everything between is the elevated span. An end at an elevated node has no
+  ramp. One helper, `isElevatedAt(edge, s)`, answers this for the graph, the renderer and the
+  simulation alike. A bridge edge too short to have an elevated span (<= 2 * `RAMP_LENGTH`) is
+  ground everywhere and behaves like a ground road for crossings.
 - **`addStroke(raw, opts?: { bridge?: boolean })`.** Every edge the stroke produces carries the
   flag.
-- **`firstCrossing(pts, bridge)`** ignores edges whose level differs from the stroke's. Ground
-  over bridge and bridge over ground: no split, no node. Bridge over bridge: split into a
-  junction, as ground roads do today. `firstSelfCrossing` is unchanged (a bridge crossing itself
-  makes a junction on the bridge).
+- **`firstCrossing(pts, bridge)`** skips a crossing when exactly one of the two roads is elevated
+  *at the crossing point* (by `isElevatedAt`; for the stroke being added, measured along the
+  piece, with its ends' levels known from the weld). Ground over elevated span and elevated span
+  over ground: no split, no node. Bridge span over bridge span: split into a junction, as ground
+  roads do today. A crossing on a ramp is at ground level, so it splits like any ground crossing.
+  `firstSelfCrossing` is unchanged (a bridge crossing itself makes a junction on the bridge).
 - **`splitEdge` copies `bridge`** to both halves.
 - **`edgeNear(p, r, level?)` and `nodeNear(p, r, level?)`** take an optional level filter.
   `weldEndpoint` uses them:
-  - ground stroke end: ground edges; nodes that are not elevated (includes ramp nodes);
+  - ground stroke end: ground edges; nodes that are not elevated (includes ramp nodes). A point on
+    a ramp is within `RAMP_LENGTH` < `SNAP_RADIUS` of its ramp node, and nodes are tried before
+    edges, so a ground end landing on a ramp welds to the ramp node rather than splitting it;
   - bridge stroke end: any edge or node (ground ones become ramps; bridge ones join at bridge
     level).
 - **Save format.** `FORMAT_VERSION` 2 -> 3; `toJSON`/`loadJSON` carry `bridge` on edges (only when
   true). Undo snapshots go through the same JSON, so undo covers bridges.
-- **No simulation change.** `LaneNetwork` and `Router` see only nodes and edges; a bridge adds no
-  node where it crosses, so no movement or conflict exists there.
+- **No change to simulation behaviour.** `LaneNetwork` and `Router` see only nodes and edges; a
+  bridge adds no node where it crosses, so no movement or conflict exists there. The only
+  simulation addition is the read-only `TrafficSim.levelOf` (section 3).
 
 Known consequence: a bridge drawn exactly through an existing ground junction passes over it
 without connecting. The snap preview shows no snap there, which tells the player.
@@ -61,7 +73,8 @@ without connecting. The snap preview shows no snap there, which tells the player
 - **Bridge tool:** a toolbar button "Bridge" with `<kbd>B</kbd>` after Draw; hotkey `b`. It draws
   exactly like Draw, but every stroke is a bridge.
 - **Alt modifier:** with the Draw tool, `isBridge = tool === 'bridge' || altKey`, read from each
-  pointer move and at release (the state at release decides). The keydown handler returns early
+  pointer move and at release (the state at release decides). With the Bridge tool, Alt changes
+  nothing: it never turns a bridge back into a ground road. The keydown handler returns early
   on `altKey` to leave browser shortcuts alone, so Alt press/release must be handled before that
   early return (or in a separate listener) to refresh the preview while the mouse is still.
 - **Snap preview** uses the same level rules as welding (`snapTargetAt(p, isBridge)`), so it shows
@@ -72,11 +85,16 @@ without connecting. The snap preview shows no snap there, which tells the player
 
 Two passes instead of one:
 
-1. **Ground pass:** grid, ground roads, ground-lane heat, nodes, signals, yield lines, vehicles
-   whose level is ground.
-2. **Bridge pass:** a soft drop shadow (deck offset slightly down-right, translucent), the bridge
-   deck in the road colours with a lighter casing that reads as railings, bridge-lane heat,
-   elevated nodes and their controls, vehicles whose level is bridge.
+1. **Ground pass:** grid, ground roads *and the ramps of bridge edges* (drawn as ordinary road),
+   heat on those stretches, ground nodes with their signals and yield lines, vehicles whose level
+   is ground.
+2. **Bridge pass:** for the elevated span of each bridge edge only (by `isElevatedAt`): a soft
+   drop shadow (deck offset slightly down-right, translucent), the deck in the road colours with a
+   lighter casing that reads as railings, heat on the span; then elevated nodes with their
+   controls, signals and yield lines; then vehicles whose level is bridge.
+
+Drawing only the span in the bridge pass keeps the deck from covering a ramp junction box, where
+ground-level vehicles (including ones on the ramp) are drawn in the ground pass.
 
 A vehicle's level comes from `TrafficSim.levelOf(v)` (section 3). The live stroke preview is drawn
 in the bridge style while `isBridge` is true.
@@ -96,10 +114,11 @@ Unchanged. An elevated junction of degree 3+ can take any control like any other
 
 ### Shared level logic
 
-`TrafficSim.levelOf(v): 'ground' | 'bridge'` is the single definition of a vehicle's level: the
-`bridge` flag of its current lane's edge; while crossing a junction box, the lane it arrived on.
-Ramp nodes are ground-level, so a vehicle coming down a ramp switches level as it enters the box.
-The renderer and the tests both call it, so what is drawn and what is tested cannot disagree.
+`TrafficSim.levelOf(v): 'ground' | 'bridge'` is the single definition of a vehicle's level. On a
+lane it is `isElevatedAt(edge, s)` at the vehicle's position, so a vehicle on a ramp is ground.
+While crossing a junction box it is the node's level (ramp nodes are ground, bridge/bridge
+junctions are elevated). The renderer and the tests both call it, so what is drawn and what is
+tested cannot disagree, and vehicles near a ramp junction stay subject to the clearance check.
 
 ### `graph.test.ts` (2-point `addStroke` strokes, hand-verifiable)
 
@@ -112,7 +131,14 @@ The renderer and the tests both call it, so what is drawn and what is tested can
   edge stays a bridge, both ground halves stay ground.
 - **No mid-span weld:** a ground stroke ending on the middle of a bridge does not split it; the
   stroke gets its own end node.
-- **Ground to ramp node:** a ground stroke ending at a bridge's end node welds to it.
+- **Ground to ramp node:** a ground stroke ending at a bridge's end node, or on its ramp, welds
+  to the end node.
+- **Crossing on a ramp:** a ground road crossing a bridge within `RAMP_LENGTH` of its ground end
+  makes a junction there (the crossing is at ground level).
+- **Too short to rise:** a bridge stroke of <= 2 * `RAMP_LENGTH` crossing a ground road makes a
+  junction, like a ground stroke.
+- **`isElevatedAt`:** false within `RAMP_LENGTH` of a ground end, true between; true all the way
+  to an end at an elevated node; false everywhere on a ground edge.
 - **Erase a bridge:** the road below is unchanged; orphaned ramp nodes are pruned.
 - **Save/load:** `bridge` survives a round trip with `format: 3`; a version-2 save loads as all
   ground.
@@ -123,11 +149,11 @@ The renderer and the tests both call it, so what is drawn and what is tested can
   bridge between two new dead ends, passing over two grid roads with no node at either crossing.
   Its ends are dead ends, so traffic spawns on it and uses it.
 - **Clearance invariant:** only pairs with the same `levelOf` are checked. The lane-overlap
-  invariant is unchanged (a lane has exactly one level).
+  invariant is unchanged (it compares vehicles on the same lane, which are at the same place).
 - **Flyover runs:** the existing invariants and the arrivals-keep-rising check also run with the
-  flyover. Direct checks: the lane network has no movement at the crossing points, and bridge
-  vehicles never claim a node while passing over.
-- **Mutation checks:** removing the level filter from `firstCrossing` must fail the overpass
+  flyover. Direct check: the lane network has no node, and so no movement, within `MERGE_DIST` of
+  either crossing point.
+- **Mutation checks:** removing the level check from `firstCrossing` must fail the overpass
   test; removing the level exemption from the clearance test must fail the flyover run (proving
   bridge vehicles actually pass over ground ones).
 
