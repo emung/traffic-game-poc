@@ -20,7 +20,23 @@ export interface Vehicle {
   legStart: number[];
   /** The junction movement this vehicle has reserved, if any. */
   holding: { node: number; key: number } | null;
-  spawnedAt: number;
+  /** When the trip was requested, not when the vehicle got in: queueing outside counts. */
+  tripStart: number;
+}
+
+/** A trip that has been requested but cannot get into the network yet. */
+interface WaitingTrip {
+  to: number;
+  requestedAt: number;
+  desiredSpeed: number;
+  /** Route length at request time; only used to weigh how late the trip is running. */
+  routeLength: number;
+}
+
+interface PlannedRoute {
+  lanes: number[];
+  legStart: number[];
+  length: number;
 }
 
 export interface TrafficStats {
@@ -38,6 +54,8 @@ export interface TrafficStats {
    */
   delayRatio: number;
   stuck: number;
+  /** Trips queued at entrances because there is no room to get in. */
+  waiting: number;
   wave: number;
   failed: boolean;
 }
@@ -75,7 +93,10 @@ export class TrafficSim {
   /** Lane id -> how freely traffic is moving on it, 1 free and 0 stopped. */
   readonly laneHeat = new Map<number, number>();
   readonly history: HistorySample[] = [];
+  /** Entrance node -> trips queued there, oldest first. */
+  private readonly waiting = new Map<number, WaitingTrip[]>();
   private nextId = 1;
+  private waveClock = 0;
   private spawnCredit = 0;
   private historyTimer = 0;
   private lowSpeedFor = 0;
@@ -85,7 +106,7 @@ export class TrafficSim {
   private arrivals = 0;
   private recentArrivals: Array<{ at: number; trip: number; ratio: number }> = [];
 
-  /** Rebuilds the lane network when the road graph has changed, resetting traffic. */
+  /** Rebuilds the lane network when the road graph has changed, keeping traffic that still has a road. */
   sync(graph: RoadGraph): void {
     if (this.network.builtVersion === graph.version) return;
     this.network.build(graph);
@@ -101,6 +122,15 @@ export class TrafficSim {
       }
       return true;
     });
+
+    // Queued trips have not set off, so they are simply re-planned on the new roads when they
+    // get in. Only those whose entrance or destination is no longer a dead end are dropped.
+    const ends = new Set(this.network.deadEnds);
+    for (const [from, queue] of this.waiting) {
+      const kept = ends.has(from) ? queue.filter((t) => ends.has(t.to)) : [];
+      if (kept.length) this.waiting.set(from, kept);
+      else this.waiting.delete(from);
+    }
   }
 
   reset(): void {
@@ -116,11 +146,32 @@ export class TrafficSim {
     this.historyTimer = 0;
     this.lowSpeedFor = 0;
     this.failed = false;
+    this.waiting.clear();
+    this.waveClock = 0;
   }
 
-  /** Demand steps up every wave, so a network that copes now will not cope for long. */
+  /**
+   * Demand steps up every wave, so a network that copes now will not cope for long. The wave
+   * clock only runs while there is traffic to serve, so an empty or unconnected map cannot bank
+   * waves by being left open.
+   */
   get wave(): number {
-    return Math.floor(this.time / C.WAVE_SECONDS) + 1;
+    return Math.floor(this.waveClock / C.WAVE_SECONDS) + 1;
+  }
+
+  /** Simulated seconds until demand next steps up. */
+  get waveRemaining(): number {
+    return C.WAVE_SECONDS - (this.waveClock % C.WAVE_SECONDS);
+  }
+
+  get waitingCount(): number {
+    let n = 0;
+    for (const queue of this.waiting.values()) n += queue.length;
+    return n;
+  }
+
+  waitingAt(node: number): number {
+    return this.waiting.get(node)?.length ?? 0;
   }
 
   private spawnRate(): number {
@@ -146,9 +197,11 @@ export class TrafficSim {
     this.spawnCredit += dt * this.spawnRate();
     while (this.spawnCredit >= 1) {
       this.spawnCredit -= 1;
-      this.trySpawn(graph);
+      this.requestTrip(graph);
     }
+    this.admitWaiting(graph);
 
+    if (this.vehicles.length || this.waitingCount) this.waveClock += dt;
     this.sampleHistory(dt);
     this.checkGridlock(dt);
   }
@@ -185,7 +238,7 @@ export class TrafficSim {
   /** A network this far behind for this long has failed; waiting longer will not clear it. */
   private checkGridlock(dt: number): void {
     const delay = this.stats().delayRatio;
-    const measurable = this.vehicles.length >= 8;
+    const measurable = this.vehicles.length + this.waitingCount >= 8;
     this.lowSpeedFor = measurable && delay > C.FAIL_DELAY_RATIO ? this.lowSpeedFor + dt : 0;
     if (this.lowSpeedFor >= C.FAIL_SECONDS) {
       this.failed = true;
@@ -358,7 +411,7 @@ export class TrafficSim {
       if (v.leg === v.route.length - 1 && v.s >= lane.length) {
         this.release(v);
         this.arrivals++;
-        const trip = this.time - v.spawnedAt;
+        const trip = this.time - v.tripStart;
         this.recentArrivals.push({ at: this.time, trip, ratio: trip / v.freeFlowTime });
         continue;
       }
@@ -371,51 +424,90 @@ export class TrafficSim {
     this.vehicles = survivors;
   }
 
-  private trySpawn(graph: RoadGraph): void {
+  /** Queues one trip at an entrance. Demand arrives whether or not the roads can take it. */
+  private requestTrip(graph: RoadGraph): void {
     const ends = this.network.deadEnds;
-    if (ends.length < 2 || this.vehicles.length >= C.MAX_VEHICLES) return;
+    if (ends.length < 2 || this.waitingCount >= C.MAX_WAITING) return;
 
-    const from = ends[(Math.random() * ends.length) | 0];
-    const to = ends[(Math.random() * ends.length) | 0];
-    if (from === to) return;
+    const i = (Math.random() * ends.length) | 0;
+    const from = ends[i];
+    const to = ends[(i + 1 + ((Math.random() * (ends.length - 1)) | 0)) % ends.length];
+    const route = this.planRoute(graph, from, to);
+    if (!route) return;
 
+    const trip: WaitingTrip = {
+      to,
+      requestedAt: this.time,
+      desiredSpeed: C.DESIRED_SPEED * (1 + (Math.random() - 0.5) * 2 * C.SPEED_VARIATION),
+      routeLength: route.length,
+    };
+    const queue = this.waiting.get(from);
+    if (queue) queue.push(trip);
+    else this.waiting.set(from, [trip]);
+  }
+
+  /**
+   * Lets the oldest trip at each entrance in once there is room behind it. Without the queue,
+   * demand the roads cannot take in simply vanished: a single road with no junctions then never
+   * fell behind however high demand climbed, and building fewer junctions was the best strategy.
+   */
+  private admitWaiting(graph: RoadGraph): void {
+    for (const [from, queue] of this.waiting) {
+      if (!queue.length || this.vehicles.length >= C.MAX_VEHICLES) continue;
+
+      // An entrance is a dead end, so it has exactly one lane in; check it before planning.
+      const entrance = this.network.outgoing.get(from)?.[0];
+      if (entrance === undefined) continue;
+      const blocker = this.byLane.get(entrance)?.[0];
+      if (blocker && blocker.s < C.CAR_LENGTH + C.MIN_GAP * 3) continue;
+
+      const trip = queue.shift()!;
+      const route = this.planRoute(graph, from, trip.to);
+      if (!route) continue;
+
+      // Enter no faster than the car ahead and slowly enough to stop behind it. Entering at road
+      // speed rear-ended queued cars: with a queue, every admission happens at the minimum gap,
+      // leaving only a few metres to brake in.
+      let v = trip.desiredSpeed * 0.9;
+      if (blocker) {
+        const room = Math.max(0, blocker.s - C.CAR_LENGTH - C.MIN_GAP);
+        v = Math.min(v, blocker.v, Math.sqrt(2 * C.COMFORT_BRAKE * room));
+      }
+
+      this.vehicles.push({
+        id: this.nextId++,
+        route: route.lanes,
+        leg: 0,
+        s: 0,
+        v,
+        desiredSpeed: trip.desiredSpeed,
+        freeFlowTime: route.length / trip.desiredSpeed,
+        routeLength: route.length,
+        legStart: route.legStart,
+        holding: null,
+        tripStart: trip.requestedAt,
+      });
+    }
+  }
+
+  private planRoute(graph: RoadGraph, from: number, to: number): PlannedRoute | null {
     const edgePath = this.router.path(graph, from, to);
-    if (!edgePath || edgePath.length === 0) return;
+    if (!edgePath || edgePath.length === 0) return null;
 
-    const route: number[] = [];
+    const lanes: number[] = [];
+    const legStart: number[] = [];
+    let length = 0;
     let node = from;
     for (const edgeId of edgePath) {
       const lane = this.network.laneFor(edgeId, node, graph);
-      if (!lane) return;
-      route.push(lane.id);
+      if (!lane) return null;
+      lanes.push(lane.id);
+      legStart.push(length);
+      length += lane.length;
       const edge = graph.edges.get(edgeId)!;
       node = edge.a === node ? edge.b : edge.a;
     }
-
-    const blocker = this.byLane.get(route[0])?.[0];
-    if (blocker && blocker.s < C.CAR_LENGTH + C.MIN_GAP * 3) return;
-
-    const legStart: number[] = [];
-    let routeLength = 0;
-    for (const id of route) {
-      legStart.push(routeLength);
-      routeLength += this.network.lanes.get(id)!.length;
-    }
-    const desiredSpeed = C.DESIRED_SPEED * (1 + (Math.random() - 0.5) * 2 * C.SPEED_VARIATION);
-
-    this.vehicles.push({
-      id: this.nextId++,
-      route,
-      leg: 0,
-      s: 0,
-      v: C.DESIRED_SPEED * 0.9,
-      desiredSpeed,
-      freeFlowTime: Math.max(1, routeLength / desiredSpeed),
-      routeLength: Math.max(1, routeLength),
-      legStart,
-      holding: null,
-      spawnedAt: this.time,
-    });
+    return { lanes, legStart, length: Math.max(1, length) };
   }
 
   /**
@@ -456,9 +548,20 @@ export class TrafficSim {
       // for whatever is left. A vehicle moving freely projects 1 however new it is, and one
       // that is crawling projects high straight away instead of only once it overruns.
       const travelled = v.legStart[v.leg] + v.s;
-      const elapsed = this.time - v.spawnedAt;
+      const elapsed = this.time - v.tripStart;
       ratioSum += Math.max(1, (elapsed * v.desiredSpeed + (v.routeLength - travelled)) / v.routeLength);
       ratioCount++;
+    }
+
+    // Trips still queued outside have the whole route ahead of them on top of their wait.
+    let waiting = 0;
+    for (const queue of this.waiting.values()) {
+      for (const trip of queue) {
+        const waited = this.time - trip.requestedAt;
+        ratioSum += (waited * trip.desiredSpeed + trip.routeLength) / trip.routeLength;
+        ratioCount++;
+        waiting++;
+      }
     }
 
     const cutoff = this.time - C.STATS_WINDOW;
@@ -482,6 +585,7 @@ export class TrafficSim {
       avgTripSeconds: this.recentArrivals.length ? tripSum / this.recentArrivals.length : 0,
       delayRatio: ratioCount ? ratioSum / ratioCount : 1,
       stuck,
+      waiting,
       wave: this.wave,
       failed: this.failed,
     };

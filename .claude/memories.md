@@ -2,13 +2,14 @@
 
 ## Scope and roadmap
 
-Prototype milestones, in order. Milestones 1 to 3 are done.
+Prototype milestones, in order. All four are done; nothing further is planned yet.
 
 1. **Drawing -> road graph** (done) — freehand strokes become a clean node/edge graph.
 2. **Traffic simulation** (done) — dead-end spawners, Dijkstra routing, IDM car-following,
    occupancy-claim junctions.
 3. **Feedback loop** (done) — jam heatmap, flow and delay charts, demand that ramps in waves.
-4. **Minimal UI** — draw/simulate mode, play/pause/speed.
+4. **Minimal UI** (done) — toolbar, 1x/2x/4x speed, time frozen while drawing, wave
+   countdown, best-wave record.
 
 Deliberately out of scope for v0: multiple road types, one-ways, traffic lights,
 zoning/economy. Roads are one lane per direction.
@@ -23,6 +24,8 @@ zoning/economy. Roads are one lane per direction.
 - **World units are metres.** Camera zoom is screen pixels per metre.
 - **Traffic enters and leaves at dead ends.** Every degree-1 node is both a source and a sink, so
   traffic appears as soon as a road is drawn, with no extra tool or UI.
+- **Live editing, with time frozen while a stroke is drawn.** Chosen over separate build/run
+  phases: the player fixes the network under pressure, but each stroke gets breathing room.
 - **Junctions reserve a movement, not the whole box.** Started as an all-way stop (one vehicle at
   a time) and was upgraded to conflict points: two movements run together unless their paths
   actually come close. Measured at 1.55x the crossings per minute of the all-way-stop version.
@@ -119,9 +122,9 @@ Two things make this work, and both were found by measurement rather than reason
   `2 * LANE_OFFSET`, the geometric minimum, and the lane-end jump at turns disappeared as a side
   effect.
 
-A junction still holds a movement for about 3 seconds per vehicle, so demand is scaled by
-`TARGET_OCCUPANCY` well below what the tarmac would physically hold. Sizing demand to road length
-instead saturates every junction and the network crawls.
+A junction still holds a movement for about 3 seconds per vehicle, which is the real capacity
+limit of a network. Early versions sized demand to road length and saturated every junction;
+demand is now a rate that ramps in waves (see the feedback loop section).
 
 Routing is static shortest-distance, so all traffic funnels onto the same path and hotspots are
 sharper than in reality. That is arguably the right behaviour for a game about spotting
@@ -130,9 +133,9 @@ bottlenecks, but it is a modelling choice, not an accident.
 
 ## Feedback loop
 
-Demand rises in waves (`WAVE_SECONDS`), driving a spawn *rate* rather than a population target,
-so vehicles enter as fast as the entrances can take them and queues back up at the city edge on
-their own. Three things tell the player how the network is doing: a congestion overlay on the
+Demand rises in waves (`WAVE_SECONDS`), driving a trip *request rate* rather than a population
+target. Requests queue at their entrance until there is room to get in (see "Unserved demand"
+below). Three things tell the player how the network is doing: a congestion overlay on the
 lanes, a rolling flow figure, and a delay ratio, the last two also drawn as sparklines.
 
 ### Congestion is delay times density, not speed alone
@@ -162,6 +165,21 @@ Two earlier versions of this metric were wrong in instructive ways:
 Failure is a sustained delay ratio above `FAIL_DELAY_RATIO`, which pauses the simulation and shows
 a banner; `R` clears it and restarts traffic.
 
+### Unserved demand has to count
+
+Originally a spawn attempt that found its entrance full was simply dropped. Measured consequence:
+a single straight road carried wave-14 demand at 38 km/h with a delay of 1.13 and could never
+fail, so building *fewer* junctions was the winning strategy and a best-wave record would only
+have measured how long the tab was open. Trips now wait in a queue per entrance and their clock
+starts at the request, so time spent outside counts as delay; the same single road now fails as
+its entrances back up. Badges at dead ends show each queue.
+
+Two related guards: the wave clock only runs while there is traffic or a queue, so an empty or
+unconnected map cannot bank waves; and admitted vehicles enter no faster than the car ahead and
+slowly enough to stop behind it. Entering at road speed was a latent milestone-3 bug that the
+queue exposed — with a queue every admission happens at the minimum gap, right behind a stopped
+car, and 8 vehicles overlapped on entrance lanes until it was fixed.
+
 ### Testing note
 
 `requestAnimationFrame` is throttled hard while the browser pane is hidden, so the loop barely
@@ -169,3 +187,35 @@ runs and `sim.time` crawls. Measurements taken then look like the simulation is 
 `window.sim` is a stale object. Bring the pane to the front before timing anything. Separately,
 Vite's HMR replaces `window.sim` on every edit, so a long-running console script should re-read
 `window.sim` each iteration rather than capturing it once.
+
+## Minimal UI
+
+One toolbar at the bottom (tools, pause, 1x/2x/4x, restart, undo, clear, fit, debug, help) with
+hotkey hints; a `?` popover holds the navigation help. The stats panel shows graph structure only
+in debug mode.
+
+Details that were deliberate:
+
+- **Speed runs more fixed steps per frame, never a larger `dt`**, so the physics are identical at
+  4x. Measured sim-to-real ratios were exactly 1.00, 2.00 and 4.00.
+- **While a stroke is being drawn the accumulator is zeroed**, so the paused time is dropped rather
+  than replayed as a burst on release.
+- **Undo rewinds the roads, not the run.** It used to call `sim.reset()`, which sent a player who
+  undid a stroke in wave 5 back to wave 1. Graph ids are now monotonic (`clear` and `loadJSON`
+  never move the counters backwards), so an id can never come back meaning a different road and
+  vehicles on surviving roads are safe to keep.
+- **Keyboard shortcuts ignore Cmd/Ctrl/Alt.** Before this, copying with Cmd+C cleared the map.
+- **Toolbar buttons blur after a click**, because a focused button is pressed by the space bar,
+  which is also the pan key.
+- **Fit frames the area the panels leave free**, measured from the panels' own rectangles, and
+  drops the stats-panel margin on narrow screens.
+- Centred fixed elements use `left/right` insets with auto margins. `left: 50%` plus a translate
+  only gives them the right half of the viewport to size into, and the toolbar wrapped at 400px.
+- The best wave is stored under `traffic-game/best-wave` and only advances while there is traffic.
+
+### Driving the simulation in tests
+
+Don't time the simulation through the page: when the browser pane is hidden,
+`requestAnimationFrame` runs at about 2 ticks per second. Call `window.sim.step(window.graph,
+1 / 60)` in a loop from the console instead; it is deterministic, independent of rendering, and
+fast (229 simulated seconds with ~170 vehicles took 0.2s of CPU).

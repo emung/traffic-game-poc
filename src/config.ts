@@ -41,6 +41,8 @@ export const CLAIM_BRAKE = 3.5;
  */
 export const MOVEMENT_CLEARANCE = 3;
 export const MAX_VEHICLES = 300;
+/** Cap on trips queued at the entrances. Far beyond it the run has failed long ago anyway. */
+export const MAX_WAITING = 400;
 
 // --- demand ---
 /** Seconds per wave; demand steps up at each one. */

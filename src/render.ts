@@ -193,6 +193,27 @@ function drawBusyJunctions(ctx: CanvasRenderingContext2D, cam: Camera, graph: Ro
   }
 }
 
+/** Trips queued at an entrance are invisible otherwise, so each busy dead end shows its count. */
+function drawWaiting(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGraph, sim: TrafficSim): void {
+  ctx.font = '600 11px ui-monospace, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const nodeId of sim.network.deadEnds) {
+    const count = sim.waitingAt(nodeId);
+    const node = graph.nodes.get(nodeId);
+    if (!count || !node) continue;
+    const s = cam.worldToScreen(node.pos);
+    const label = String(count);
+    const w = Math.max(18, ctx.measureText(label).width + 10);
+    ctx.fillStyle = count >= 10 ? COLORS.erase : COLORS.nodeEnd;
+    ctx.beginPath();
+    ctx.roundRect(s.x - w / 2, s.y - 24, w, 16, 8);
+    ctx.fill();
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillText(label, s.x, s.y - 15.5);
+  }
+}
+
 export function render(
   ctx: CanvasRenderingContext2D,
   cam: Camera,
@@ -216,5 +237,6 @@ export function render(
   if (view.debug) drawDebug(ctx, cam, graph, view);
   ctx.restore();
 
+  drawWaiting(ctx, cam, graph, sim);
   if (view.debug) drawLabels(ctx, cam, graph);
 }

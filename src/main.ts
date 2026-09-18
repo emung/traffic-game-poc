@@ -3,7 +3,14 @@ import { RoadGraph, type RoadEdge } from './graph';
 import { Camera } from './camera';
 import { render, type ViewState } from './render';
 import { TrafficSim } from './traffic';
-import { MAX_SUBSTEPS, SAMPLE_SPACING_PX, SIM_STEP, SNAP_RADIUS, UNDO_LIMIT } from './config';
+import {
+  MAX_SUBSTEPS,
+  SAMPLE_SPACING_PX,
+  SIM_STEP,
+  SNAP_RADIUS,
+  UNDO_LIMIT,
+  WAVE_SECONDS,
+} from './config';
 
 const canvas = document.getElementById('c') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
@@ -18,11 +25,19 @@ let panning = false;
 let drawing = false;
 let stroke: Vec2[] = [];
 let lastScreen: Vec2 = { x: 0, y: 0 };
+/** Simulated seconds per real second. */
+let speed = 1;
 
 const view: ViewState = { liveStroke: null, snap: null, hoverEdge: null, debug: false };
 const undoStack: string[] = [];
 
 const STORAGE_KEY = 'traffic-game/graph';
+const BEST_WAVE_KEY = 'traffic-game/best-wave';
+
+let bestWave = Number(localStorage.getItem(BEST_WAVE_KEY)) || 0;
+/** The record as it stood when this run began, so the end of a run can say whether it beat it. */
+let bestBeforeRun = bestWave;
+let failureShown = false;
 
 function pushUndo(): void {
   undoStack.push(graph.toJSON());
@@ -36,6 +51,18 @@ function persist(): void {
 function restore(): void {
   const saved = localStorage.getItem(STORAGE_KEY);
   if (saved) graph.loadJSON(saved);
+}
+
+/**
+ * The part of the screen the stats panel and toolbar do not cover, measured from the panels
+ * themselves. On a narrow screen the stats panel is left out, since reserving it would leave
+ * almost nothing to frame the network in.
+ */
+function unobstructedArea(): { left: number; top: number; right: number; bottom: number } {
+  const stats = document.getElementById('stats')!.getBoundingClientRect();
+  const toolbar = document.getElementById('toolbar')!.getBoundingClientRect();
+  const left = cam.width - stats.right > 300 ? stats.right + 12 : 12;
+  return { left, top: 12, right: cam.width - 12, bottom: toolbar.top - 12 };
 }
 
 function fitView(): void {
@@ -55,13 +82,18 @@ function fitView(): void {
     cam.zoom = 2;
     return;
   }
-  cam.x = (minX + maxX) / 2;
-  cam.y = (minY + maxY) / 2;
+  const area = unobstructedArea();
   const pad = 80;
   cam.zoom = Math.min(
     20,
-    Math.max(0.25, Math.min(cam.width / (maxX - minX + pad), cam.height / (maxY - minY + pad))),
+    Math.max(
+      0.25,
+      Math.min((area.right - area.left) / (maxX - minX + pad), (area.bottom - area.top) / (maxY - minY + pad)),
+    ),
   );
+  // Put the network's centre at the centre of the visible area rather than of the window.
+  cam.x = (minX + maxX) / 2 - ((area.left + area.right) / 2 - cam.width / 2) / cam.zoom;
+  cam.y = (minY + maxY) / 2 - ((area.top + area.bottom) / 2 - cam.height / 2) / cam.zoom;
 }
 
 function resize(): void {
@@ -175,34 +207,104 @@ canvas.addEventListener(
 
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
+function buttons(action: string): HTMLButtonElement[] {
+  return [...document.querySelectorAll<HTMLButtonElement>(`#toolbar [data-action="${action}"]`)];
+}
+
 function setTool(next: Tool): void {
   tool = next;
   view.snap = null;
   view.hoverEdge = null;
   canvas.classList.toggle('erasing', tool === 'erase');
-  for (const btn of document.querySelectorAll<HTMLButtonElement>('#tools button')) {
-    btn.classList.toggle('active', btn.dataset.tool === tool);
+  for (const btn of buttons('draw')) btn.classList.toggle('active', tool === 'draw');
+  for (const btn of buttons('erase')) btn.classList.toggle('active', tool === 'erase');
+}
+
+function setRunning(run: boolean): void {
+  sim.running = run;
+  for (const btn of buttons('play')) {
+    btn.querySelector('.label')!.textContent = run ? 'Pause' : 'Play';
+    btn.classList.toggle('active', !run);
   }
 }
 
-for (const btn of document.querySelectorAll<HTMLButtonElement>('#tools button')) {
-  btn.addEventListener('click', () => setTool(btn.dataset.tool as Tool));
+function setSpeed(next: number): void {
+  speed = next;
+  for (const btn of buttons('speed')) btn.classList.toggle('active', Number(btn.dataset.speed) === speed);
+}
+
+function setDebug(on: boolean): void {
+  view.debug = on;
+  for (const btn of buttons('debug')) btn.classList.toggle('active', on);
+}
+
+const help = document.getElementById('help') as HTMLElement;
+
+function toggleHelp(): void {
+  help.hidden = !help.hidden;
+  for (const btn of buttons('help')) btn.classList.toggle('active', !help.hidden);
+}
+
+function startRun(): void {
+  sim.reset();
+  bestBeforeRun = bestWave;
+  failureShown = false;
+  setRunning(true);
+}
+
+/**
+ * Undo rewinds the roads, not the run. Traffic on roads that survive keeps going, which is what
+ * makes fixing a bad stroke mid-wave cheap; restarting the run is a separate, explicit action.
+ */
+function undo(): void {
+  const snapshot = undoStack.pop();
+  if (!snapshot) return;
+  graph.loadJSON(snapshot);
+  view.hoverEdge = null;
+  persist();
+}
+
+function clearAll(): void {
+  pushUndo();
+  graph.clear();
+  persist();
+  startRun();
+}
+
+const actions: Record<string, (btn: HTMLButtonElement) => void> = {
+  draw: () => setTool('draw'),
+  erase: () => setTool('erase'),
+  play: () => setRunning(!sim.running),
+  speed: (btn) => setSpeed(Number(btn.dataset.speed)),
+  reset: () => startRun(),
+  undo: () => undo(),
+  clear: () => clearAll(),
+  fit: () => fitView(),
+  debug: () => setDebug(!view.debug),
+  help: () => toggleHelp(),
+};
+
+for (const btn of document.querySelectorAll<HTMLButtonElement>('#toolbar button')) {
+  btn.addEventListener('click', () => {
+    actions[btn.dataset.action!](btn);
+    // Give focus back to the page: a focused button would otherwise be pressed by the next
+    // space bar, which is also the pan key.
+    btn.blur();
+  });
 }
 
 window.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
     e.preventDefault();
-    const snapshot = undoStack.pop();
-    if (snapshot) {
-      graph.loadJSON(snapshot);
-      sim.reset();
-      view.hoverEdge = null;
-      persist();
-    }
+    undo();
     return;
   }
+  // Leave browser shortcuts alone: without this, copying with Cmd+C cleared the whole map.
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
   switch (e.key.toLowerCase()) {
     case ' ':
+      e.preventDefault();
       spaceHeld = true;
       canvas.classList.add('panning');
       break;
@@ -212,24 +314,28 @@ window.addEventListener('keydown', (e) => {
     case 'e':
       setTool('erase');
       break;
-    case 'g':
-      view.debug = !view.debug;
+    case 'p':
+      setRunning(!sim.running);
+      break;
+    case '1':
+    case '2':
+    case '4':
+      setSpeed(Number(e.key));
+      break;
+    case 'r':
+      startRun();
+      break;
+    case 'c':
+      clearAll();
       break;
     case 'f':
       fitView();
       break;
-    case 'c':
-      pushUndo();
-      graph.clear();
-      sim.reset();
-      persist();
+    case 'g':
+      setDebug(!view.debug);
       break;
-    case 'p':
-      setRunning(!sim.running);
-      break;
-    case 'r':
-      sim.reset();
-      setRunning(true);
+    case '?':
+      toggleHelp();
       break;
   }
 });
@@ -242,30 +348,27 @@ window.addEventListener('keyup', (e) => {
   }
 });
 
-const playBtn = document.getElementById('play') as HTMLButtonElement;
-
-function setRunning(run: boolean): void {
-  sim.running = run;
-  playBtn.textContent = run ? 'Pause' : 'Play';
-  playBtn.classList.toggle('active', run);
-}
-
-playBtn.addEventListener('click', () => setRunning(!sim.running));
-
 const el = {
+  structure: document.getElementById('structure') as HTMLElement,
   nodes: document.getElementById('n-nodes')!,
   edges: document.getElementById('n-edges')!,
   junctions: document.getElementById('n-junctions')!,
   deadends: document.getElementById('n-deadends')!,
-  length: document.getElementById('n-length')!,
   wave: document.getElementById('n-wave')!,
+  best: document.getElementById('n-best')!,
+  waveBar: document.getElementById('wave-bar') as HTMLElement,
+  next: document.getElementById('n-next')!,
   cars: document.getElementById('n-cars')!,
   speed: document.getElementById('n-speed')!,
+  waiting: document.getElementById('n-waiting')!,
   arrived: document.getElementById('n-arrived')!,
+  length: document.getElementById('n-length')!,
   flow: document.getElementById('n-flow')!,
   trip: document.getElementById('n-trip')!,
+  hold: document.getElementById('hold') as HTMLElement,
   banner: document.getElementById('banner') as HTMLElement,
   bannerSub: document.getElementById('banner-sub')!,
+  bannerBest: document.getElementById('banner-best')!,
 };
 
 const sparkFlow = (document.getElementById('spark-flow') as HTMLCanvasElement).getContext('2d')!;
@@ -320,54 +423,81 @@ function drawSpark(
 }
 
 function updateHud(): void {
-  let junctions = 0;
-  let deadends = 0;
-  for (const node of graph.nodes.values()) {
-    if (node.edges.length >= 3) junctions++;
-    else if (node.edges.length === 1) deadends++;
+  el.structure.hidden = !view.debug;
+  if (view.debug) {
+    let junctions = 0;
+    let deadends = 0;
+    for (const node of graph.nodes.values()) {
+      if (node.edges.length >= 3) junctions++;
+      else if (node.edges.length === 1) deadends++;
+    }
+    el.nodes.textContent = String(graph.nodes.size);
+    el.edges.textContent = String(graph.edges.size);
+    el.junctions.textContent = String(junctions);
+    el.deadends.textContent = String(deadends);
   }
-  el.nodes.textContent = String(graph.nodes.size);
-  el.edges.textContent = String(graph.edges.size);
-  el.junctions.textContent = String(junctions);
-  el.deadends.textContent = String(deadends);
-  const m = graph.totalLength();
-  el.length.textContent = m > 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`;
 
   const t = sim.stats();
+  const busy = t.vehicles > 0 || t.waiting > 0;
+  if (busy && t.wave > bestWave) {
+    bestWave = t.wave;
+    localStorage.setItem(BEST_WAVE_KEY, String(bestWave));
+  }
   el.wave.textContent = String(t.wave);
+  el.best.textContent = String(bestWave);
+  el.waveBar.style.width = `${(1 - sim.waveRemaining / WAVE_SECONDS) * 100}%`;
+  el.next.textContent = busy ? `in ${Math.ceil(sim.waveRemaining)} s` : 'no traffic';
+
   el.cars.textContent = String(t.vehicles);
   el.speed.textContent = `${t.avgSpeedKmh.toFixed(0)} km/h`;
+  el.waiting.textContent = String(t.waiting);
   el.arrived.textContent = String(t.arrivals);
+  const m = graph.totalLength();
+  el.length.textContent = m > 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`;
   el.flow.textContent = `${t.flowPerMin.toFixed(1)} /min`;
   el.trip.textContent = t.avgTripSeconds
     ? `${t.delayRatio.toFixed(1)}x · ${t.avgTripSeconds.toFixed(0)} s`
     : '--';
 
   drawSpark(sparkFlow, sim.history.map((h) => h.flow), '#7dd3fc', false);
-  drawSpark(sparkTrip, sim.history.map((h) => h.delay), '#fbbf24', true);
+  // Plotted as delay beyond a free run, so an unobstructed network sits on the floor of the
+  // chart rather than a flat line at 1x reading as maxed out.
+  drawSpark(sparkTrip, sim.history.map((h) => h.delay - 1), '#fbbf24', true);
 
-  el.banner.hidden = !t.failed;
-  if (t.failed) {
-    el.bannerSub.textContent = `wave ${t.wave} · journeys took ${t.delayRatio.toFixed(1)}x too long`;
+  if (t.failed && !failureShown) {
+    failureShown = true;
+    setRunning(false);
+    el.bannerSub.textContent = `gridlocked in wave ${t.wave} · journeys took ${t.delayRatio.toFixed(1)}x too long`;
+    el.bannerBest.textContent =
+      t.wave > bestBeforeRun ? `new best: wave ${t.wave}` : `best: wave ${bestWave}`;
   }
-  if (t.failed && playBtn.textContent !== 'Play') setRunning(false);
+  el.banner.hidden = !t.failed;
+  el.hold.hidden = !(drawing && sim.running);
 }
 
 let lastTime = performance.now();
 let accumulator = 0;
 
 function frame(now: number): void {
-  accumulator += Math.min(0.25, (now - lastTime) / 1000);
+  const elapsed = Math.min(0.25, (now - lastTime) / 1000);
   lastTime = now;
 
-  let steps = 0;
-  while (accumulator >= SIM_STEP && steps < MAX_SUBSTEPS) {
-    sim.step(graph, SIM_STEP);
-    accumulator -= SIM_STEP;
-    steps++;
+  if (drawing) {
+    // Time stands still while a stroke is being drawn, so a fix can be drawn with care even
+    // mid-wave. The time that passed is dropped, not replayed as a burst on release.
+    accumulator = 0;
+  } else {
+    accumulator += elapsed * speed;
+    const maxSteps = MAX_SUBSTEPS * speed;
+    let steps = 0;
+    while (accumulator >= SIM_STEP && steps < maxSteps) {
+      sim.step(graph, SIM_STEP);
+      accumulator -= SIM_STEP;
+      steps++;
+    }
+    // Drop the backlog rather than spiralling if a frame ran long.
+    if (steps === maxSteps) accumulator = 0;
   }
-  // Drop the backlog rather than spiralling if a frame ran long.
-  if (steps === MAX_SUBSTEPS) accumulator = 0;
 
   sim.sync(graph);
   render(ctx, cam, graph, sim, view);
@@ -378,7 +508,7 @@ function frame(now: number): void {
 window.addEventListener('resize', resize);
 resize();
 restore();
-setRunning(true);
+startRun();
 requestAnimationFrame(frame);
 
 Object.assign(window, { graph, cam, sim });

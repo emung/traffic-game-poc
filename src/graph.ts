@@ -257,8 +257,6 @@ export class RoadGraph {
   clear(): void {
     this.nodes.clear();
     this.edges.clear();
-    this.nextNode = 1;
-    this.nextEdge = 1;
     this.version++;
   }
 
@@ -279,8 +277,10 @@ export class RoadGraph {
       edges: Array<{ id: number; a: number; b: number; points: Vec2[] }>;
     };
     this.clear();
-    this.nextNode = data.nextNode;
-    this.nextEdge = data.nextEdge;
+    // Ids never go backwards, even when an older snapshot is restored. Traffic refers to lanes
+    // by id, so an id that came back meaning a different road would teleport vehicles onto it.
+    this.nextNode = Math.max(this.nextNode, data.nextNode);
+    this.nextEdge = Math.max(this.nextEdge, data.nextEdge);
     for (const n of data.nodes) this.nodes.set(n.id, { id: n.id, pos: n.pos, edges: [] });
     for (const e of data.edges) {
       this.edges.set(e.id, { id: e.id, a: e.a, b: e.b, points: e.points });
