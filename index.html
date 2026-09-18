@@ -44,6 +44,34 @@
         cursor: pointer;
       }
       #tools button.active { color: #0b1220; background: #7dd3fc; border-color: #7dd3fc; }
+
+      hr.sep { border: 0; border-top: 1px solid #262c37; margin: 8px 0; }
+      .spark-row { display: flex; justify-content: space-between; gap: 16px; }
+      canvas.spark {
+        display: block;
+        width: 190px;
+        height: 24px;
+        margin: 2px 0 7px;
+        background: #151921;
+        border-radius: 3px;
+      }
+
+      #banner {
+        position: fixed;
+        top: 42%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        text-align: center;
+        font: 600 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #fca5a5;
+        background: rgba(24, 14, 16, 0.92);
+        border: 1px solid #7f1d1d;
+        border-radius: 10px;
+        padding: 16px 28px;
+        user-select: none;
+      }
+      #banner strong { display: block; font-size: 20px; letter-spacing: 3px; color: #f87171; }
+      #banner span { color: #9aa4b2; font-weight: 400; }
     </style>
   </head>
   <body>
@@ -53,9 +81,20 @@
       <div>nodes <b id="n-nodes">0</b> &nbsp; edges <b id="n-edges">0</b></div>
       <div>junctions <b id="n-junctions">0</b> &nbsp; dead ends <b id="n-deadends">0</b></div>
       <div>network <b id="n-length">0 m</b></div>
-      <hr style="border:0;border-top:1px solid #262c37;margin:8px 0" />
-      <div>cars <b id="n-cars">0</b> &nbsp; avg <b id="n-speed">0 km/h</b></div>
-      <div>arrived <b id="n-arrived">0</b> &nbsp; trip <b id="n-trip">--</b></div>
+      <hr class="sep" />
+      <div>wave <b id="n-wave">1</b> &nbsp; cars <b id="n-cars">0</b> &nbsp; avg <b id="n-speed">0 km/h</b></div>
+      <div>arrived <b id="n-arrived">0</b></div>
+      <hr class="sep" />
+      <div class="spark-row"><span>flow</span><b id="n-flow">0 /min</b></div>
+      <canvas id="spark-flow" class="spark" width="380" height="48"></canvas>
+      <div class="spark-row"><span>delay</span><b id="n-trip">--</b></div>
+      <canvas id="spark-trip" class="spark" width="380" height="48"></canvas>
+    </div>
+
+    <div id="banner" hidden>
+      <strong>GRIDLOCK</strong>
+      <div id="banner-sub"></div>
+      <span>press R to reset traffic</span>
     </div>
 
     <div class="panel" id="tools">

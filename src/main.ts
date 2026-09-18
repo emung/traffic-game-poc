@@ -229,6 +229,7 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'r':
       sim.reset();
+      setRunning(true);
       break;
   }
 });
@@ -257,11 +258,66 @@ const el = {
   junctions: document.getElementById('n-junctions')!,
   deadends: document.getElementById('n-deadends')!,
   length: document.getElementById('n-length')!,
+  wave: document.getElementById('n-wave')!,
   cars: document.getElementById('n-cars')!,
   speed: document.getElementById('n-speed')!,
   arrived: document.getElementById('n-arrived')!,
+  flow: document.getElementById('n-flow')!,
   trip: document.getElementById('n-trip')!,
+  banner: document.getElementById('banner') as HTMLElement,
+  bannerSub: document.getElementById('banner-sub')!,
 };
+
+const sparkFlow = (document.getElementById('spark-flow') as HTMLCanvasElement).getContext('2d')!;
+const sparkTrip = (document.getElementById('spark-trip') as HTMLCanvasElement).getContext('2d')!;
+
+/**
+ * Draws one metric's recent history. The scale is taken from the data rather than fixed, so a
+ * change the player just drew is visible even when the absolute numbers are small.
+ */
+function drawSpark(
+  c: CanvasRenderingContext2D,
+  values: number[],
+  colour: string,
+  lowerIsBetter: boolean,
+): void {
+  const { width: w, height: h } = c.canvas;
+  c.clearRect(0, 0, w, h);
+  if (values.length < 2) return;
+
+  const peak = Math.max(...values, 1e-6);
+  const pad = 4;
+  const x = (i: number) => (i / (values.length - 1)) * w;
+  const y = (v: number) => h - pad - (v / peak) * (h - pad * 2);
+
+  c.beginPath();
+  c.moveTo(x(0), h);
+  for (let i = 0; i < values.length; i++) c.lineTo(x(i), y(values[i]));
+  c.lineTo(x(values.length - 1), h);
+  c.closePath();
+  c.fillStyle = colour;
+  c.globalAlpha = 0.16;
+  c.fill();
+
+  c.globalAlpha = 1;
+  c.beginPath();
+  for (let i = 0; i < values.length; i++) {
+    if (i === 0) c.moveTo(x(i), y(values[i]));
+    else c.lineTo(x(i), y(values[i]));
+  }
+  c.strokeStyle = colour;
+  c.lineWidth = 2;
+  c.stroke();
+
+  // mark the latest value, green when the metric is heading the right way
+  const last = values[values.length - 1];
+  const prev = values[Math.max(0, values.length - 6)];
+  const improving = lowerIsBetter ? last < prev : last > prev;
+  c.beginPath();
+  c.arc(x(values.length - 1), y(last), 3, 0, Math.PI * 2);
+  c.fillStyle = improving ? '#4ade80' : '#f87171';
+  c.fill();
+}
 
 function updateHud(): void {
   let junctions = 0;
@@ -278,10 +334,23 @@ function updateHud(): void {
   el.length.textContent = m > 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`;
 
   const t = sim.stats();
+  el.wave.textContent = String(t.wave);
   el.cars.textContent = String(t.vehicles);
   el.speed.textContent = `${t.avgSpeedKmh.toFixed(0)} km/h`;
   el.arrived.textContent = String(t.arrivals);
-  el.trip.textContent = t.avgTripSeconds ? `${t.avgTripSeconds.toFixed(0)} s` : '--';
+  el.flow.textContent = `${t.flowPerMin.toFixed(1)} /min`;
+  el.trip.textContent = t.avgTripSeconds
+    ? `${t.delayRatio.toFixed(1)}x · ${t.avgTripSeconds.toFixed(0)} s`
+    : '--';
+
+  drawSpark(sparkFlow, sim.history.map((h) => h.flow), '#7dd3fc', false);
+  drawSpark(sparkTrip, sim.history.map((h) => h.delay), '#fbbf24', true);
+
+  el.banner.hidden = !t.failed;
+  if (t.failed) {
+    el.bannerSub.textContent = `wave ${t.wave} · journeys took ${t.delayRatio.toFixed(1)}x too long`;
+  }
+  if (t.failed && playBtn.textContent !== 'Play') setRunning(false);
 }
 
 let lastTime = performance.now();

@@ -1,7 +1,7 @@
 import { type Vec2 } from './geom';
 import { type RoadEdge, type RoadGraph } from './graph';
 import { type Camera } from './camera';
-import { COLORS, ROAD_WIDTH, SNAP_RADIUS, CAR_LENGTH, CAR_WIDTH } from './config';
+import { COLORS, ROAD_WIDTH, SNAP_RADIUS, CAR_LENGTH, CAR_WIDTH, LANE_OFFSET } from './config';
 import { type TrafficSim } from './traffic';
 
 export interface ViewState {
@@ -147,6 +147,26 @@ function drawLabels(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGraph
   }
 }
 
+/**
+ * Paints congested lanes amber through red. Free-flowing lanes are left alone so a healthy
+ * network stays calm and only the problems draw the eye.
+ */
+function drawHeat(ctx: CanvasRenderingContext2D, sim: TrafficSim): void {
+  ctx.lineCap = 'butt';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = LANE_OFFSET * 1.7;
+  for (const lane of sim.network.lanes.values()) {
+    const congestion = 1 - (sim.laneHeat.get(lane.id) ?? 1);
+    if (congestion < 0.15) continue;
+    const severity = Math.min(1, (congestion - 0.15) / 0.65);
+    ctx.strokeStyle = `hsl(${Math.round(45 - 45 * severity)}, 90%, 55%)`;
+    ctx.globalAlpha = 0.25 + 0.5 * severity;
+    tracePolyline(ctx, lane.points);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
 function drawVehicles(ctx: CanvasRenderingContext2D, sim: TrafficSim): void {
   for (const v of sim.vehicles) {
     const pose = sim.poseOf(v);
@@ -188,6 +208,7 @@ export function render(
   cam.applyTo(ctx);
   drawGrid(ctx, cam);
   drawRoads(ctx, graph, view);
+  drawHeat(ctx, sim);
   drawNodes(ctx, graph, cam);
   drawVehicles(ctx, sim);
   if (view.debug) drawBusyJunctions(ctx, cam, graph, sim);

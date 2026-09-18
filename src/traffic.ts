@@ -13,6 +13,11 @@ export interface Vehicle {
   s: number;
   v: number;
   desiredSpeed: number;
+  /** Seconds this trip would take with the road to itself; the yardstick for delay. */
+  freeFlowTime: number;
+  routeLength: number;
+  /** Distance from the start of the route to the start of each leg. */
+  legStart: number[];
   /** The junction movement this vehicle has reserved, if any. */
   holding: { node: number; key: number } | null;
   spawnedAt: number;
@@ -22,8 +27,24 @@ export interface TrafficStats {
   vehicles: number;
   avgSpeedKmh: number;
   arrivals: number;
+  /** Arrivals per minute over the recent window, not since the start. */
+  flowPerMin: number;
+  /** Mean trip time of recent arrivals, so it recovers when the network improves. */
   avgTripSeconds: number;
+  /**
+   * How many times longer journeys take than a free run, counting vehicles still travelling as
+   * well as those that arrived. Arrivals alone are survivorship-biased: in a real jam nothing
+   * arrives at all, so an arrivals-only measure reports that everything is fine.
+   */
+  delayRatio: number;
   stuck: number;
+  wave: number;
+  failed: boolean;
+}
+
+export interface HistorySample {
+  flow: number;
+  delay: number;
 }
 
 /** Distance past a junction at which a vehicle has cleared the box and gives it back. */
@@ -51,12 +72,18 @@ export class TrafficSim {
   private byLane = new Map<number, Vehicle[]>();
   /** Node id -> movement key -> how many vehicles are currently performing it. */
   readonly active = new Map<number, Map<number, number>>();
+  /** Lane id -> how freely traffic is moving on it, 1 free and 0 stopped. */
+  readonly laneHeat = new Map<number, number>();
+  readonly history: HistorySample[] = [];
   private nextId = 1;
-  private spawnTimer = 0;
+  private spawnCredit = 0;
+  private historyTimer = 0;
+  private lowSpeedFor = 0;
   running = false;
+  failed = false;
   time = 0;
   private arrivals = 0;
-  private tripTimeTotal = 0;
+  private recentArrivals: Array<{ at: number; trip: number; ratio: number }> = [];
 
   /** Rebuilds the lane network when the road graph has changed, resetting traffic. */
   sync(graph: RoadGraph): void {
@@ -80,9 +107,24 @@ export class TrafficSim {
     this.vehicles = [];
     this.byLane.clear();
     this.active.clear();
+    this.laneHeat.clear();
+    this.history.length = 0;
+    this.recentArrivals = [];
     this.arrivals = 0;
-    this.tripTimeTotal = 0;
     this.time = 0;
+    this.spawnCredit = 0;
+    this.historyTimer = 0;
+    this.lowSpeedFor = 0;
+    this.failed = false;
+  }
+
+  /** Demand steps up every wave, so a network that copes now will not cope for long. */
+  get wave(): number {
+    return Math.floor(this.time / C.WAVE_SECONDS) + 1;
+  }
+
+  private spawnRate(): number {
+    return C.BASE_SPAWN_RATE * (1 + (this.wave - 1) * C.WAVE_GROWTH);
   }
 
   step(graph: RoadGraph, dt: number): void {
@@ -99,11 +141,55 @@ export class TrafficSim {
     }
 
     this.advanceLegs();
+    this.updateHeat(dt);
 
-    this.spawnTimer += dt;
-    while (this.spawnTimer >= C.SPAWN_INTERVAL) {
-      this.spawnTimer -= C.SPAWN_INTERVAL;
+    this.spawnCredit += dt * this.spawnRate();
+    while (this.spawnCredit >= 1) {
+      this.spawnCredit -= 1;
       this.trySpawn(graph);
+    }
+
+    this.sampleHistory(dt);
+    this.checkGridlock(dt);
+  }
+
+  /** Smooths each lane's speed ratio so the congestion overlay does not flicker. */
+  private updateHeat(dt: number): void {
+    const alpha = 1 - Math.exp(-dt / C.HEAT_TIME_CONSTANT);
+    for (const lane of this.network.lanes.values()) {
+      const list = this.byLane.get(lane.id);
+      let target = 1;
+      if (list && list.length) {
+        let sum = 0;
+        for (const v of list) sum += Math.min(1, v.v / v.desiredSpeed);
+        // Weighted by how full the lane is: one car pulling away from a dead end is not a jam,
+        // so slow traffic only reads as congestion once there is enough of it to be queueing.
+        const occupancy = (list.length * (C.CAR_LENGTH + C.MIN_GAP)) / lane.length;
+        const density = Math.min(1, occupancy / C.HEAT_DENSITY_FULL);
+        target = 1 - (1 - sum / list.length) * density;
+      }
+      const current = this.laneHeat.get(lane.id) ?? 1;
+      this.laneHeat.set(lane.id, current + (target - current) * alpha);
+    }
+  }
+
+  private sampleHistory(dt: number): void {
+    this.historyTimer += dt;
+    if (this.historyTimer < C.HISTORY_SAMPLE_SECONDS) return;
+    this.historyTimer = 0;
+    const s = this.stats();
+    this.history.push({ flow: s.flowPerMin, delay: s.delayRatio });
+    if (this.history.length > C.HISTORY_LENGTH) this.history.shift();
+  }
+
+  /** A network this far behind for this long has failed; waiting longer will not clear it. */
+  private checkGridlock(dt: number): void {
+    const delay = this.stats().delayRatio;
+    const measurable = this.vehicles.length >= 8;
+    this.lowSpeedFor = measurable && delay > C.FAIL_DELAY_RATIO ? this.lowSpeedFor + dt : 0;
+    if (this.lowSpeedFor >= C.FAIL_SECONDS) {
+      this.failed = true;
+      this.running = false;
     }
   }
 
@@ -272,7 +358,8 @@ export class TrafficSim {
       if (v.leg === v.route.length - 1 && v.s >= lane.length) {
         this.release(v);
         this.arrivals++;
-        this.tripTimeTotal += this.time - v.spawnedAt;
+        const trip = this.time - v.spawnedAt;
+        this.recentArrivals.push({ at: this.time, trip, ratio: trip / v.freeFlowTime });
         continue;
       }
 
@@ -286,7 +373,7 @@ export class TrafficSim {
 
   private trySpawn(graph: RoadGraph): void {
     const ends = this.network.deadEnds;
-    if (ends.length < 2 || this.vehicles.length >= this.demandCap()) return;
+    if (ends.length < 2 || this.vehicles.length >= C.MAX_VEHICLES) return;
 
     const from = ends[(Math.random() * ends.length) | 0];
     const to = ends[(Math.random() * ends.length) | 0];
@@ -308,26 +395,27 @@ export class TrafficSim {
     const blocker = this.byLane.get(route[0])?.[0];
     if (blocker && blocker.s < C.CAR_LENGTH + C.MIN_GAP * 3) return;
 
+    const legStart: number[] = [];
+    let routeLength = 0;
+    for (const id of route) {
+      legStart.push(routeLength);
+      routeLength += this.network.lanes.get(id)!.length;
+    }
+    const desiredSpeed = C.DESIRED_SPEED * (1 + (Math.random() - 0.5) * 2 * C.SPEED_VARIATION);
+
     this.vehicles.push({
       id: this.nextId++,
       route,
       leg: 0,
       s: 0,
-      v: C.DESIRED_SPEED * 0.5,
-      desiredSpeed: C.DESIRED_SPEED * (1 + (Math.random() - 0.5) * 2 * C.SPEED_VARIATION),
+      v: C.DESIRED_SPEED * 0.9,
+      desiredSpeed,
+      freeFlowTime: Math.max(1, routeLength / desiredSpeed),
+      routeLength: Math.max(1, routeLength),
+      legStart,
       holding: null,
       spawnedAt: this.time,
     });
-  }
-
-  /**
-   * How many vehicles the network is allowed to hold. Demand is scaled to road capacity so a
-   * small network is busy rather than instantly gridlocked.
-   */
-  private demandCap(): number {
-    const perVehicle = C.CAR_LENGTH + C.MIN_GAP + 3;
-    const capacity = this.network.totalLength / perVehicle;
-    return Math.max(4, Math.min(C.MAX_VEHICLES, Math.round(capacity * C.TARGET_OCCUPANCY)));
   }
 
   /**
@@ -359,17 +447,43 @@ export class TrafficSim {
   stats(): TrafficStats {
     let speedSum = 0;
     let stuck = 0;
+    let ratioSum = 0;
+    let ratioCount = 0;
     for (const v of this.vehicles) {
       speedSum += v.v;
       if (v.v < 0.5) stuck++;
+      // Project the whole journey from progress so far: time already spent, plus a free run
+      // for whatever is left. A vehicle moving freely projects 1 however new it is, and one
+      // that is crawling projects high straight away instead of only once it overruns.
+      const travelled = v.legStart[v.leg] + v.s;
+      const elapsed = this.time - v.spawnedAt;
+      ratioSum += Math.max(1, (elapsed * v.desiredSpeed + (v.routeLength - travelled)) / v.routeLength);
+      ratioCount++;
     }
+
+    const cutoff = this.time - C.STATS_WINDOW;
+    while (this.recentArrivals.length && this.recentArrivals[0].at < cutoff) {
+      this.recentArrivals.shift();
+    }
+    let tripSum = 0;
+    for (const a of this.recentArrivals) {
+      tripSum += a.trip;
+      ratioSum += a.ratio;
+      ratioCount++;
+    }
+    const span = Math.min(this.time, C.STATS_WINDOW);
+
     const n = this.vehicles.length;
     return {
       vehicles: n,
       avgSpeedKmh: n ? (speedSum / n) * 3.6 : 0,
       arrivals: this.arrivals,
-      avgTripSeconds: this.arrivals ? this.tripTimeTotal / this.arrivals : 0,
+      flowPerMin: span > 0 ? (this.recentArrivals.length / span) * 60 : 0,
+      avgTripSeconds: this.recentArrivals.length ? tripSum / this.recentArrivals.length : 0,
+      delayRatio: ratioCount ? ratioSum / ratioCount : 1,
       stuck,
+      wave: this.wave,
+      failed: this.failed,
     };
   }
 }

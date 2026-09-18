@@ -2,13 +2,12 @@
 
 ## Scope and roadmap
 
-Prototype milestones, in order. Milestones 1 and 2 are done.
+Prototype milestones, in order. Milestones 1 to 3 are done.
 
 1. **Drawing -> road graph** (done) — freehand strokes become a clean node/edge graph.
 2. **Traffic simulation** (done) — dead-end spawners, Dijkstra routing, IDM car-following,
    occupancy-claim junctions.
-3. **Feedback loop** — a visible metric (travel time, throughput, jam heatmap). This is what
-   makes it a game rather than a doodle pad; without it there is nothing to optimise against.
+3. **Feedback loop** (done) — jam heatmap, flow and delay charts, demand that ramps in waves.
 4. **Minimal UI** — draw/simulate mode, play/pause/speed.
 
 Deliberately out of scope for v0: multiple road types, one-ways, traffic lights,
@@ -127,3 +126,46 @@ instead saturates every junction and the network crawls.
 Routing is static shortest-distance, so all traffic funnels onto the same path and hotspots are
 sharper than in reality. That is arguably the right behaviour for a game about spotting
 bottlenecks, but it is a modelling choice, not an accident.
+
+
+## Feedback loop
+
+Demand rises in waves (`WAVE_SECONDS`), driving a spawn *rate* rather than a population target,
+so vehicles enter as fast as the entrances can take them and queues back up at the city edge on
+their own. Three things tell the player how the network is doing: a congestion overlay on the
+lanes, a rolling flow figure, and a delay ratio, the last two also drawn as sparklines.
+
+### Congestion is delay times density, not speed alone
+
+The overlay smooths each lane's mean speed ratio, then **weights it by how full the lane is**.
+Without the density weighting a single vehicle pulling away from a dead end paints an entire
+empty street red. Free-flowing lanes are deliberately left unpainted so that a healthy network
+looks calm and only problems draw the eye.
+
+### Delay ratio, and two ways of measuring it wrongly
+
+The headline metric is how many times longer journeys take than a free run, which is
+self-calibrating across networks in a way that raw trip seconds is not. Absolute speed turned out
+to be a poor health signal at all: a busy network settles at a low but *steady* speed while still
+serving everyone, so a speed threshold never fires.
+
+Two earlier versions of this metric were wrong in instructive ways:
+
+- **Measuring arrivals only is survivorship bias.** In a real jam nothing arrives, the rolling
+  window empties, and an arrivals-only average reports that everything is fine — exactly backwards
+  at the moment it matters most. Vehicles still travelling have to count.
+- **Counting elapsed time alone lags badly.** Most vehicles in a congested network are young, so
+  averaging "time spent so far" drowns the signal. The measure instead *projects* each journey
+  from its progress: time already spent plus a free run for the distance left. A vehicle moving
+  freely projects 1 however new it is, and one that is crawling projects high immediately.
+
+Failure is a sustained delay ratio above `FAIL_DELAY_RATIO`, which pauses the simulation and shows
+a banner; `R` clears it and restarts traffic.
+
+### Testing note
+
+`requestAnimationFrame` is throttled hard while the browser pane is hidden, so the loop barely
+runs and `sim.time` crawls. Measurements taken then look like the simulation is frozen or like
+`window.sim` is a stale object. Bring the pane to the front before timing anything. Separately,
+Vite's HMR replaces `window.sim` on every edit, so a long-running console script should re-read
+`window.sim` each iteration rather than capturing it once.

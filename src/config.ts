@@ -40,14 +40,32 @@ export const CLAIM_BRAKE = 3.5;
  * straight-throughs still run together while near misses at the node do not.
  */
 export const MOVEMENT_CLEARANCE = 3;
-export const SPAWN_INTERVAL = 0.5;
 export const MAX_VEHICLES = 300;
+
+// --- demand ---
+/** Seconds per wave; demand steps up at each one. */
+export const WAVE_SECONDS = 30;
+/** Spawn attempts per second during the first wave. */
+export const BASE_SPAWN_RATE = 1.1;
+/** Extra share of the base rate added by each wave after the first. */
+export const WAVE_GROWTH = 0.35;
 /**
- * Share of road capacity that traffic demand fills up to. Junctions, not road length, are the
- * real bottleneck: one vehicle at a time holds a junction for roughly 3s, capping it near 20
- * vehicles a minute, so demand has to sit far below what the tarmac would physically hold.
+ * How many times longer than a free run a journey may average before the network counts as
+ * failed. Absolute speed is a poor signal: a busy network settles at a low but steady speed and
+ * is still serving everyone. Delay relative to a free run is self-calibrating across networks.
  */
-export const TARGET_OCCUPANCY = 0.06;
+export const FAIL_DELAY_RATIO = 3;
+export const FAIL_SECONDS = 20;
+
+// --- feedback ---
+/** Seconds of arrivals used for the rolling flow and trip-time figures. */
+export const STATS_WINDOW = 60;
+/** How quickly the congestion overlay follows a change in speed. */
+export const HEAT_TIME_CONSTANT = 3;
+/** Lane occupancy at which slow traffic counts as fully congested rather than merely sparse. */
+export const HEAT_DENSITY_FULL = 0.4;
+export const HISTORY_SAMPLE_SECONDS = 1;
+export const HISTORY_LENGTH = 120;
 export const SIM_STEP = 1 / 60;
 export const MAX_SUBSTEPS = 5;
 
