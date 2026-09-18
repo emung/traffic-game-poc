@@ -8,6 +8,13 @@ export const SNAP_RADIUS = 14;
 /** Junctions closer together than this are collapsed into one. */
 export const MERGE_DIST = 5;
 export const MIN_ROAD_LENGTH = 12;
+/**
+ * How much of a bridge, from each end that meets the ground, is a ramp at ground level; the rest
+ * is the elevated span. At least the largest junction box (ROUNDABOUT_ZONE), so a junction box at
+ * a ramp is always on the ground, and below SNAP_RADIUS, so a stroke end landing on a ramp welds
+ * to the ramp's node rather than splitting the ramp.
+ */
+export const RAMP_LENGTH = 12;
 /** Minimum screen-space spacing between captured stroke samples. */
 export const SAMPLE_SPACING_PX = 3;
 export const UNDO_LIMIT = 50;
@@ -151,6 +158,9 @@ export const COLORS = {
   casing: '#272d38',
   road: '#525d70',
   centerline: '#8b97ad',
+  /** A bridge deck's edge, lighter than a road's casing so it reads as railings. */
+  bridgeRail: '#9aa5b8',
+  bridgeShadow: '#000000',
   node: '#7dd3fc',
   nodeEnd: '#fbbf24',
   stroke: '#38bdf8',

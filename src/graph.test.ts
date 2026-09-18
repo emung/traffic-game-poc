@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RoadGraph } from './graph';
+import { RAMP_LENGTH } from './config';
 
 /** Every edge's geometry must be exactly incident to its endpoint nodes, never merely near them. */
 function assertWelded(graph: RoadGraph): void {
@@ -257,5 +258,168 @@ describe('junction control', () => {
     const created = [...graph.nodes.values()].filter((n) => !known.has(n.id));
     expect(created.length).toBeGreaterThan(0);
     for (const n of created) expect(n.control).toBeUndefined();
+  });
+});
+
+describe('bridges', () => {
+  const line = (x0: number, y0: number, x1: number, y1: number) => [
+    { x: x0, y: y0 },
+    { x: x1, y: y1 },
+  ];
+  const bridgeOf = (graph: RoadGraph) => [...graph.edges.values()].filter((e) => e.bridge);
+  const groundOf = (graph: RoadGraph) => [...graph.edges.values()].filter((e) => !e.bridge);
+
+  it('carries a bridge over a road with no junction', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 50, 100, 50));
+    graph.addStroke(line(50, 0, 50, 100), { bridge: true });
+
+    expect(graph.edges.size).toBe(2);
+    expect(degreeHistogram(graph)).toEqual([1, 1, 1, 1]);
+    expect(bridgeOf(graph)).toHaveLength(1);
+    expect(groundOf(graph)[0].points).toEqual(line(0, 50, 100, 50));
+    assertWelded(graph);
+  });
+
+  it('passes a road under a bridge with no junction', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(50, 0, 50, 100), { bridge: true });
+    graph.addStroke(line(0, 50, 100, 50));
+
+    expect(graph.edges.size).toBe(2);
+    expect(degreeHistogram(graph)).toEqual([1, 1, 1, 1]);
+    expect(bridgeOf(graph)[0].points).toEqual(line(50, 0, 50, 100));
+  });
+
+  it('joins two crossing bridges at a junction up top', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 50, 100, 50), { bridge: true });
+    graph.addStroke(line(50, 0, 50, 100), { bridge: true });
+
+    expect(graph.edges.size).toBe(4);
+    expect(degreeHistogram(graph)).toEqual([1, 1, 1, 1, 4]);
+    expect(bridgeOf(graph)).toHaveLength(4);
+    const centre = [...graph.nodes.values()].find((n) => n.edges.length === 4)!;
+    expect(graph.isElevatedNode(centre.id)).toBe(true);
+    assertWelded(graph);
+  });
+
+  it('welds a bridge end onto a bridge mid-span, up top', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 0, 100, 0), { bridge: true });
+    graph.addStroke(line(50, 40, 50, 3), { bridge: true });
+
+    expect(degreeHistogram(graph)).toEqual([1, 1, 1, 3]);
+    const t = [...graph.nodes.values()].find((n) => n.edges.length === 3)!;
+    expect(graph.isElevatedNode(t.id)).toBe(true);
+  });
+
+  it('lands a bridge on the middle of a road as a ramp (T junction)', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 0, 100, 0));
+    graph.addStroke(line(50, 40, 50, 3), { bridge: true });
+
+    expect(degreeHistogram(graph)).toEqual([1, 1, 1, 3]);
+    expect(bridgeOf(graph)).toHaveLength(1);
+    expect(groundOf(graph)).toHaveLength(2);
+    const t = [...graph.nodes.values()].find((n) => n.edges.length === 3)!;
+    expect(graph.isElevatedNode(t.id)).toBe(false);
+    assertWelded(graph);
+  });
+
+  it('does not weld a road end onto a bridge mid-span', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 0, 100, 0), { bridge: true });
+    graph.addStroke(line(50, 40, 50, 3));
+
+    expect(graph.edges.size).toBe(2);
+    expect(degreeHistogram(graph)).toEqual([1, 1, 1, 1]);
+    expect(bridgeOf(graph)[0].points).toEqual(line(0, 0, 100, 0));
+  });
+
+  it('welds a road end on a ramp to the ramp node', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 0, 100, 0), { bridge: true });
+    graph.addStroke(line(5, 40, 5, 3));
+
+    expect(graph.edges.size).toBe(2);
+    expect(degreeHistogram(graph)).toEqual([1, 1, 2]);
+    expect(graph.nodeNear({ x: 0, y: 0 }, 0.01)!.edges).toHaveLength(2);
+    assertWelded(graph);
+  });
+
+  it('makes a junction where a road crosses a ramp, since the ramp is on the ground', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 0, 100, 0), { bridge: true });
+    graph.addStroke(line(8, -40, 8, 40));
+
+    expect(degreeHistogram(graph)).toEqual([1, 1, 1, 1, 4]);
+    const junction = [...graph.nodes.values()].find((n) => n.edges.length === 4)!;
+    expect(junction.pos.x).toBeCloseTo(8);
+    expect(graph.isElevatedNode(junction.id)).toBe(false);
+    // Both halves of the bridge are still bridges; the span starts a ramp past the junction.
+    expect(bridgeOf(graph)).toHaveLength(2);
+  });
+
+  it('keeps a bridge too short for its ramps on the ground, so a road crossing it meets it', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 0, 0, 2 * RAMP_LENGTH - 2), { bridge: true });
+    expect(graph.elevatedRange(bridgeOf(graph)[0])).toBeNull();
+
+    graph.addStroke(line(-50, 10, 50, 10));
+    expect(degreeHistogram(graph)).toEqual([1, 1, 1, 1, 4]);
+  });
+
+  it('is elevated between its ramps, and right up to an end at a junction up top', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 0, 100, 0), { bridge: true });
+    const [deck] = bridgeOf(graph);
+    expect(graph.isElevatedAt(deck, RAMP_LENGTH - 1)).toBe(false);
+    expect(graph.isElevatedAt(deck, 50)).toBe(true);
+    expect(graph.isElevatedAt(deck, 100 - RAMP_LENGTH + 1)).toBe(false);
+
+    // A second bridge makes the middle a junction up top: no ramp at that end of either half.
+    graph.addStroke(line(50, -50, 50, 50), { bridge: true });
+    const half = bridgeOf(graph).find((e) => e.points.some((p) => p.x === 0 && p.y === 0))!;
+    const length = graph.edgeLength(half);
+    const atCentre = graph.nodes.get(half.a)!.pos.x === 50 ? 1 : length - 1;
+    expect(graph.isElevatedAt(half, atCentre)).toBe(true);
+
+    graph.addStroke(line(0, 80, 100, 80));
+    const road = groundOf(graph)[0];
+    expect(graph.isElevatedAt(road, 50)).toBe(false);
+  });
+
+  it('erases a bridge without touching the road below', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 50, 100, 50));
+    graph.addStroke(line(50, 0, 50, 100), { bridge: true });
+    graph.removeEdge(bridgeOf(graph)[0].id);
+    graph.pruneOrphans();
+
+    expect(graph.nodes.size).toBe(2);
+    expect(graph.edges.size).toBe(1);
+    expect(groundOf(graph)[0].points).toEqual(line(0, 50, 100, 50));
+  });
+
+  it('survives a save/load round trip, and a save from before bridges loads as all ground', () => {
+    const graph = new RoadGraph();
+    graph.addStroke(line(0, 50, 100, 50));
+    graph.addStroke(line(50, 0, 50, 100), { bridge: true });
+    const saved = graph.toJSON();
+    expect(JSON.parse(saved).format).toBe(3);
+
+    const loaded = new RoadGraph();
+    loaded.loadJSON(saved);
+    expect(bridgeOf(loaded)).toHaveLength(1);
+    expect(groundOf(loaded)).toHaveLength(1);
+
+    const old = JSON.parse(saved);
+    old.format = 2;
+    for (const e of old.edges) delete e.bridge;
+    const legacy = new RoadGraph();
+    legacy.loadJSON(JSON.stringify(old));
+    expect(bridgeOf(legacy)).toHaveLength(0);
+    expect(legacy.edges.size).toBe(2);
   });
 });

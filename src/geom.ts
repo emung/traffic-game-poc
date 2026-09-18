@@ -95,6 +95,26 @@ export function splitPolyline(pts: Vec2[], segIdx: number, t: number): [Vec2[], 
   ];
 }
 
+/** The part of a polyline between arc lengths `s0` and `s1`, clamped to its ends. */
+export function slicePolyline(pts: Vec2[], s0: number, s1: number): Vec2[] {
+  const out: Vec2[] = [];
+  let at = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const d = dist(pts[i], pts[i + 1]);
+    const next = at + d;
+    if (next >= s0 && at <= s1 && d > 0) {
+      if (!out.length) out.push(lerp(pts[i], pts[i + 1], Math.max(0, (s0 - at) / d)));
+      if (next <= s1) out.push(clone(pts[i + 1]));
+      else {
+        out.push(lerp(pts[i], pts[i + 1], (s1 - at) / d));
+        break;
+      }
+    }
+    at = next;
+  }
+  return out;
+}
+
 /** Smallest distance between two segments; zero when they cross. */
 export function segmentDistance(a1: Vec2, a2: Vec2, b1: Vec2, b2: Vec2): number {
   if (segmentIntersect(a1, a2, b1, b2)) return 0;

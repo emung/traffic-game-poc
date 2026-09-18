@@ -724,6 +724,18 @@ export class TrafficSim {
     return this.network.sample(lane, v.s);
   }
 
+  /**
+   * Whether a vehicle is on the ground or up on a bridge: the lane's elevated span at its
+   * position. Ramps are at least as long as any junction box, so a vehicle in the box at a ramp
+   * junction is on the ground, and one in the box of a bridge/bridge junction is up top (the span
+   * is unbounded at an elevated end, which covers the negative `s` of a vehicle leaving that box).
+   * The renderer and the tests both use this, so what is drawn and what is checked agree.
+   */
+  levelOf(v: Vehicle): 'ground' | 'bridge' {
+    const span = this.network.lanes.get(v.route[v.leg])?.elevated;
+    return span && v.s > span.lo && v.s < span.hi ? 'bridge' : 'ground';
+  }
+
   stats(): TrafficStats {
     let speedSum = 0;
     let stuck = 0;

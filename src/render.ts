@@ -1,5 +1,5 @@
-import { type Vec2 } from './geom';
-import { type JunctionControl, type RoadEdge, type RoadGraph, type RoadNode } from './graph';
+import { type Vec2, slicePolyline } from './geom';
+import { type JunctionControl, type RoadEdge, type RoadGraph, type RoadNode, type Span } from './graph';
 import { type Camera } from './camera';
 import {
   COLORS,
@@ -12,8 +12,12 @@ import {
 } from './config';
 import { type TrafficSim } from './traffic';
 
+type Level = 'ground' | 'bridge';
+
 export interface ViewState {
   liveStroke: Vec2[] | null;
+  /** The stroke being drawn will be a bridge. */
+  liveBridge: boolean;
   snap: { pos: Vec2; kind: 'node' | 'edge' } | null;
   hoverEdge: RoadEdge | null;
   /** Junction the control tool would change on click. */
@@ -37,6 +41,30 @@ function tracePolyline(ctx: CanvasRenderingContext2D, pts: Vec2[]): void {
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+}
+
+/**
+ * The stretches of a polyline at one level, given its elevated span (arc lengths, possibly
+ * infinite at an elevated end): the span itself for the bridge, the ramps either side for the
+ * ground. With no span the whole line is on the ground.
+ */
+function stretches(pts: Vec2[], length: number, span: Span | null, level: Level): Vec2[][] {
+  if (!span) return level === 'ground' ? [pts] : [];
+  const lo = Math.max(0, span.lo);
+  const hi = Math.min(length, span.hi);
+  const parts = level === 'bridge' ? [[lo, hi]] : [[0, lo], [hi, length]];
+  return parts
+    .filter(([a, b]) => b - a > 1e-6)
+    .map(([a, b]) => slicePolyline(pts, a, b))
+    .filter((p) => p.length > 1);
+}
+
+function edgeStretches(graph: RoadGraph, edge: RoadEdge, level: Level): Vec2[][] {
+  return stretches(edge.points, graph.edgeLength(edge), graph.elevatedRange(edge), level);
+}
+
+function nodeLevel(graph: RoadGraph, id: number): Level {
+  return graph.isElevatedNode(id) ? 'bridge' : 'ground';
 }
 
 function drawGrid(ctx: CanvasRenderingContext2D, cam: Camera): void {
@@ -63,22 +91,43 @@ function drawGrid(ctx: CanvasRenderingContext2D, cam: Camera): void {
   }
 }
 
-function drawRoads(ctx: CanvasRenderingContext2D, graph: RoadGraph, view: ViewState): void {
-  const edges = [...graph.edges.values()];
+/**
+ * Roads at one level: on the ground, every ground road plus the ramps of bridges; up top, the
+ * elevated spans, with a drop shadow and a light rail in place of the casing.
+ */
+function drawRoads(ctx: CanvasRenderingContext2D, graph: RoadGraph, view: ViewState, level: Level): void {
+  const pieces: Array<{ edge: RoadEdge; pts: Vec2[] }> = [];
+  for (const edge of graph.edges.values()) {
+    for (const pts of edgeStretches(graph, edge, level)) pieces.push({ edge, pts });
+  }
+  if (!pieces.length) return;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  ctx.strokeStyle = COLORS.casing;
+  if (level === 'bridge') {
+    ctx.save();
+    ctx.translate(1.5, 2);
+    ctx.strokeStyle = COLORS.bridgeShadow;
+    ctx.globalAlpha = 0.45;
+    ctx.lineWidth = ROAD_WIDTH + 4;
+    for (const { pts } of pieces) {
+      tracePolyline(ctx, pts);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  ctx.strokeStyle = level === 'bridge' ? COLORS.bridgeRail : COLORS.casing;
   ctx.lineWidth = ROAD_WIDTH + 2.5;
-  for (const edge of edges) {
-    tracePolyline(ctx, edge.points);
+  for (const { pts } of pieces) {
+    tracePolyline(ctx, pts);
     ctx.stroke();
   }
 
   ctx.lineWidth = ROAD_WIDTH;
-  for (const edge of edges) {
+  for (const { edge, pts } of pieces) {
     ctx.strokeStyle = edge === view.hoverEdge ? COLORS.erase : COLORS.road;
-    tracePolyline(ctx, edge.points);
+    tracePolyline(ctx, pts);
     ctx.stroke();
   }
 
@@ -86,8 +135,8 @@ function drawRoads(ctx: CanvasRenderingContext2D, graph: RoadGraph, view: ViewSt
   ctx.lineWidth = 0.35;
   ctx.globalAlpha = 0.55;
   ctx.setLineDash([3, 4]);
-  for (const edge of edges) {
-    tracePolyline(ctx, edge.points);
+  for (const { pts } of pieces) {
+    tracePolyline(ctx, pts);
     ctx.stroke();
   }
   ctx.setLineDash([]);
@@ -116,9 +165,10 @@ function drawRoundabout(ctx: CanvasRenderingContext2D, cam: Camera, node: RoadNo
   ctx.stroke();
 }
 
-function drawNodes(ctx: CanvasRenderingContext2D, graph: RoadGraph, cam: Camera, sim: TrafficSim): void {
+function drawNodes(ctx: CanvasRenderingContext2D, graph: RoadGraph, cam: Camera, sim: TrafficSim, level: Level): void {
   const r = Math.max(1.6, 4 / cam.zoom);
   for (const node of graph.nodes.values()) {
+    if (nodeLevel(graph, node.id) !== level) continue;
     const ring = node.edges.length >= 3 ? sim.network.ringRadiusOf(node.id) : null;
     if (ring !== null) {
       drawRoundabout(ctx, cam, node, ring);
@@ -142,6 +192,20 @@ function drawNodes(ctx: CanvasRenderingContext2D, graph: RoadGraph, cam: Camera,
 
 function drawOverlay(ctx: CanvasRenderingContext2D, cam: Camera, view: ViewState): void {
   if (view.liveStroke && view.liveStroke.length > 1) {
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    if (view.liveBridge) {
+      // A rail either side, as a bridge deck has.
+      ctx.strokeStyle = COLORS.bridgeRail;
+      ctx.globalAlpha = 0.7;
+      ctx.lineWidth = ROAD_WIDTH + 2.5;
+      tracePolyline(ctx, view.liveStroke);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = COLORS.bg;
+      ctx.lineWidth = ROAD_WIDTH;
+      ctx.stroke();
+    }
     ctx.strokeStyle = COLORS.stroke;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -217,7 +281,7 @@ function drawLabels(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGraph
  * Paints congested lanes amber through red. Free-flowing lanes are left alone so a healthy
  * network stays calm and only the problems draw the eye.
  */
-function drawHeat(ctx: CanvasRenderingContext2D, sim: TrafficSim): void {
+function drawHeat(ctx: CanvasRenderingContext2D, sim: TrafficSim, level: Level): void {
   ctx.lineCap = 'butt';
   ctx.lineJoin = 'round';
   ctx.lineWidth = LANE_OFFSET * 1.7;
@@ -227,14 +291,17 @@ function drawHeat(ctx: CanvasRenderingContext2D, sim: TrafficSim): void {
     const severity = Math.min(1, (congestion - 0.15) / 0.65);
     ctx.strokeStyle = `hsl(${Math.round(45 - 45 * severity)}, 90%, 55%)`;
     ctx.globalAlpha = 0.25 + 0.5 * severity;
-    tracePolyline(ctx, lane.points);
-    ctx.stroke();
+    for (const pts of stretches(lane.points, lane.length, lane.elevated, level)) {
+      tracePolyline(ctx, pts);
+      ctx.stroke();
+    }
   }
   ctx.globalAlpha = 1;
 }
 
-function drawVehicles(ctx: CanvasRenderingContext2D, sim: TrafficSim): void {
+function drawVehicles(ctx: CanvasRenderingContext2D, sim: TrafficSim, level: Level): void {
   for (const v of sim.vehicles) {
+    if (sim.levelOf(v) !== level) continue;
     const pose = sim.poseOf(v);
     if (!pose) continue;
     const ratio = Math.min(1, v.v / v.desiredSpeed);
@@ -248,10 +315,11 @@ function drawVehicles(ctx: CanvasRenderingContext2D, sim: TrafficSim): void {
 }
 
 /** A bar across each approach at the stop line, red or green with the signal's current head. */
-function drawSignals(ctx: CanvasRenderingContext2D, cam: Camera, sim: TrafficSim): void {
+function drawSignals(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGraph, sim: TrafficSim, level: Level): void {
   ctx.lineCap = 'butt';
   ctx.lineWidth = Math.max(0.9, 2.5 / cam.zoom);
   for (const [node, phases] of sim.network.phases) {
+    if (nodeLevel(graph, node) !== level) continue;
     for (const laneId of phases.flat()) {
       const lane = sim.network.lanes.get(laneId);
       if (!lane) continue;
@@ -267,12 +335,13 @@ function drawSignals(ctx: CanvasRenderingContext2D, cam: Camera, sim: TrafficSim
 }
 
 /** A dashed give-way line across each minor approach of a priority junction. */
-function drawYields(ctx: CanvasRenderingContext2D, cam: Camera, sim: TrafficSim): void {
+function drawYields(ctx: CanvasRenderingContext2D, cam: Camera, graph: RoadGraph, sim: TrafficSim, level: Level): void {
   ctx.lineCap = 'butt';
   ctx.lineWidth = Math.max(0.9, 2.5 / cam.zoom);
   ctx.strokeStyle = COLORS.controlPriority;
   ctx.setLineDash([1.2, 1]);
   for (const [node, major] of sim.network.majorLanes) {
+    if (nodeLevel(graph, node) !== level) continue;
     for (const lane of sim.network.lanes.values()) {
       if (lane.to !== node || major.has(lane.id)) continue;
       const pose = sim.network.sample(lane, lane.length - JUNCTION_RADIUS);
@@ -333,12 +402,15 @@ export function render(
   ctx.save();
   cam.applyTo(ctx);
   drawGrid(ctx, cam);
-  drawRoads(ctx, graph, view);
-  drawHeat(ctx, sim);
-  drawNodes(ctx, graph, cam, sim);
-  drawSignals(ctx, cam, sim);
-  drawYields(ctx, cam, sim);
-  drawVehicles(ctx, sim);
+  // The ground first, then the bridges over it, each with its own junctions and traffic.
+  for (const level of ['ground', 'bridge'] as const) {
+    drawRoads(ctx, graph, view, level);
+    drawHeat(ctx, sim, level);
+    drawNodes(ctx, graph, cam, sim, level);
+    drawSignals(ctx, cam, graph, sim, level);
+    drawYields(ctx, cam, graph, sim, level);
+    drawVehicles(ctx, sim, level);
+  }
   if (view.debug) drawBusyJunctions(ctx, cam, graph, sim);
   drawOverlay(ctx, cam, view);
   if (view.debug) drawDebug(ctx, cam, graph, view);

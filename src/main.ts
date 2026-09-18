@@ -1,4 +1,4 @@
-import { type Vec2, dist } from './geom';
+import { type Vec2, arcLengthAt, closestOnPolyline, dist } from './geom';
 import { JUNCTION_CONTROLS, RoadGraph, type JunctionControl, type RoadEdge, type RoadNode } from './graph';
 import { Camera } from './camera';
 import { render, type ViewState } from './render';
@@ -17,9 +17,11 @@ const cam = new Camera();
 const graph = new RoadGraph();
 const sim = new TrafficSim();
 
-type Tool = 'draw' | 'erase' | 'control';
+type Tool = 'draw' | 'bridge' | 'erase' | 'control';
 let tool: Tool = 'draw';
 let spaceHeld = false;
+/** Alt turns the Draw tool into the Bridge tool for as long as it is held. */
+let altHeld = false;
 let panning = false;
 let drawing = false;
 let stroke: Vec2[] = [];
@@ -27,7 +29,14 @@ let lastScreen: Vec2 = { x: 0, y: 0 };
 /** Simulated seconds per real second. */
 let speed = 1;
 
-const view: ViewState = { liveStroke: null, snap: null, hoverEdge: null, hoverNode: null, debug: false };
+const view: ViewState = {
+  liveStroke: null,
+  liveBridge: false,
+  snap: null,
+  hoverEdge: null,
+  hoverNode: null,
+  debug: false,
+};
 const undoStack: string[] = [];
 
 const STORAGE_KEY = 'traffic-game/graph';
@@ -105,17 +114,53 @@ function screenOf(e: PointerEvent | WheelEvent): Vec2 {
   return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
 
+function drawsRoads(): boolean {
+  return tool === 'draw' || tool === 'bridge';
+}
+
+/** Whether a stroke finished now would be a bridge. Alt never turns the Bridge tool back into Draw. */
+function drawingBridge(): boolean {
+  return tool === 'bridge' || (tool === 'draw' && altHeld);
+}
+
+/** What a stroke end here would weld to, by the same rules as `RoadGraph.addStroke`. */
 function snapTargetAt(p: Vec2): ViewState['snap'] {
-  const node = graph.nodeNear(p, SNAP_RADIUS);
+  const groundOnly = !drawingBridge();
+  const node = graph.nodeNear(p, SNAP_RADIUS, groundOnly);
   if (node) return { pos: node.pos, kind: 'node' };
-  const hit = graph.edgeNear(p, SNAP_RADIUS);
+  const hit = graph.edgeNear(p, SNAP_RADIUS, groundOnly);
   if (hit) return { pos: hit.point, kind: 'edge' };
   return null;
 }
 
+/** The road a click would erase. A bridge is drawn over the roads it crosses, so it wins there. */
 function edgeUnder(p: Vec2): RoadEdge | null {
-  return graph.edgeNear(p, 6)?.edge ?? null;
+  let best: RoadEdge | null = null;
+  let bestUp = false;
+  let bestDist = Infinity;
+  for (const edge of graph.edges.values()) {
+    const hit = closestOnPolyline(p, edge.points);
+    if (!hit || hit.dist > 6) continue;
+    const up = graph.isElevatedAt(edge, arcLengthAt(edge.points, hit.segIdx, hit.t));
+    if ((up && !bestUp) || (up === bestUp && hit.dist < bestDist)) {
+      best = edge;
+      bestUp = up;
+      bestDist = hit.dist;
+    }
+  }
+  return best;
 }
+
+/** Tracks Alt from any input event, so the preview follows it even while the mouse is still. */
+function setAlt(held: boolean): void {
+  if (held === altHeld) return;
+  altHeld = held;
+  view.liveBridge = drawingBridge();
+  if (drawsRoads()) view.snap = snapTargetAt(cam.screenToWorld(lastScreen));
+}
+
+// A key released while the window is in the background never sends keyup.
+window.addEventListener('blur', () => setAlt(false));
 
 /** A junction the control tool can act on: a node where at least three roads meet. */
 function junctionUnder(p: Vec2): RoadNode | null {
@@ -132,6 +177,7 @@ function nextControl(current: JunctionControl | undefined): JunctionControl | nu
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
   lastScreen = screenOf(e);
+  setAlt(e.altKey);
 
   if (e.button === 1 || spaceHeld) {
     panning = true;
@@ -175,11 +221,13 @@ canvas.addEventListener('pointerdown', (e) => {
   drawing = true;
   stroke = [world];
   view.liveStroke = stroke;
+  view.liveBridge = drawingBridge();
 });
 
 canvas.addEventListener('pointermove', (e) => {
   const screen = screenOf(e);
   const world = cam.screenToWorld(screen);
+  setAlt(e.altKey);
 
   if (panning) {
     cam.panByScreen(screen.x - lastScreen.x, screen.y - lastScreen.y);
@@ -195,7 +243,7 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
 
-  view.snap = tool === 'draw' ? snapTargetAt(world) : null;
+  view.snap = drawsRoads() ? snapTargetAt(world) : null;
   view.hoverEdge = tool === 'erase' ? edgeUnder(world) : null;
   view.hoverNode = tool === 'control' ? junctionUnder(world) : null;
 });
@@ -207,12 +255,13 @@ function endStroke(): void {
   view.snap = null;
 
   pushUndo();
-  if (graph.addStroke(stroke)) persist();
+  if (graph.addStroke(stroke, { bridge: drawingBridge() })) persist();
   else undoStack.pop();
   stroke = [];
 }
 
-canvas.addEventListener('pointerup', () => {
+canvas.addEventListener('pointerup', (e) => {
+  setAlt(e.altKey);
   panning = false;
   endStroke();
 });
@@ -247,6 +296,7 @@ function setTool(next: Tool): void {
   canvas.classList.toggle('erasing', tool === 'erase');
   canvas.classList.toggle('controlling', tool === 'control');
   for (const btn of buttons('draw')) btn.classList.toggle('active', tool === 'draw');
+  for (const btn of buttons('bridge')) btn.classList.toggle('active', tool === 'bridge');
   for (const btn of buttons('erase')) btn.classList.toggle('active', tool === 'erase');
   for (const btn of buttons('control')) btn.classList.toggle('active', tool === 'control');
 }
@@ -304,6 +354,7 @@ function clearAll(): void {
 
 const actions: Record<string, (btn: HTMLButtonElement) => void> = {
   draw: () => setTool('draw'),
+  bridge: () => setTool('bridge'),
   erase: () => setTool('erase'),
   control: () => setTool('control'),
   play: () => setRunning(!sim.running),
@@ -326,6 +377,12 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('#toolbar button'
 }
 
 window.addEventListener('keydown', (e) => {
+  // Before the modifier check below, which would otherwise swallow Alt itself.
+  if (e.key === 'Alt') {
+    e.preventDefault();
+    setAlt(true);
+    return;
+  }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     undo();
@@ -342,6 +399,9 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'd':
       setTool('draw');
+      break;
+    case 'b':
+      setTool('bridge');
       break;
     case 'e':
       setTool('erase');
@@ -376,6 +436,7 @@ window.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('keyup', (e) => {
+  if (e.key === 'Alt') setAlt(false);
   if (e.key === ' ') {
     spaceHeld = false;
     panning = false;

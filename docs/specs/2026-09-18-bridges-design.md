@@ -1,6 +1,9 @@
 # Milestone 8: Bridges — design
 
-Status: approved design, not yet implemented. Date: 2026-09-18.
+Status: implemented 2026-09-18. Deviations: the flyover test fixture uses square ramps (a
+shallow-angle ramp exposed a pre-existing near-miss unrelated to bridges; see `.claude/memories.md`
+"Bridges"), and "too short to rise" is tested with a ground road crossing a short bridge, since a
+short bridge crossing a road always has an end within `SNAP_RADIUS` of it and welds instead.
 
 ## Problem
 

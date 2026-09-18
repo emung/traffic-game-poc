@@ -20,7 +20,7 @@ was left sitting in the candidate list.
 
 ## Scope and roadmap
 
-Milestones are built one at a time. 1–7 are done; 8–17 are candidates.
+Milestones are built one at a time. 1–8 are done; 9–17 are candidates.
 
 1. **Drawing -> road graph** (done) — freehand strokes become a clean node/edge graph.
 2. **Traffic simulation** (done) — dead-end spawners, Dijkstra routing, IDM car-following,
@@ -36,22 +36,20 @@ Milestones are built one at a time. 1–7 are done; 8–17 are candidates.
 7. **Junction tools** (done) — signals, priority roads and roundabouts, placed with the Control
    tool (`T`); plain junctions are deliberately slow so controls are upgrades. See "Junction
    controls" below.
+8. **Bridges** (done) — Alt while drawing, or the Bridge tool (`B`), carries a road over others
+   with no junction; ramps at the ends are on the ground. See "Bridges" below.
 
 v0 deliberately left out multiple road types, one-ways, traffic lights, zoning and any economy,
 and roads are one lane per direction. Road types and a budget are now candidates; zoning is not.
 
 ### Candidate milestones
 
-None of 8–17 is started. Each begins only when picked, with its design questions settled then.
+None of 9–17 is started. Each begins only when picked, with its design questions settled then.
 Road budget (9) is the natural next step: priority roads currently cost nothing and dominate
 the other controls (see "Junction controls"). The list
-is grouped by theme, not ranked: problems the simulation exposed (8), costs and goals (9–11),
-feedback (12–14) and quality of life (15–17).
+is grouped by theme, not ranked: costs and goals (9–11), feedback (12–14) and quality of life
+(15–17).
 
-8. **Bridges** — every crossing becomes a junction. A modifier key while drawing would carry a
-   road over the others with no node, so no conflict points. `addStroke` splits at every crossing
-   and rendering has no layers, so both need changing; the simulation only interacts at nodes and
-   should need no change.
 9. **Road budget** — nothing stops the player paving everything. Charge per metre, more for
    bridges, so every stroke is a trade-off. Open: refunds on erase and undo, and how the budget
    grows over time (there are no waves any more).
@@ -115,9 +113,9 @@ feedback (12–14) and quality of life (15–17).
 `RoadGraph.addStroke` (src/graph.ts) cleans the stroke (RDP simplify -> Chaikin smooth -> RDP
 again), welds both endpoints onto any nearby node or edge, then works a queue of polyline
 pieces: each piece is split at its first self-crossing, then at its first crossing with the
-existing graph, until pieces are crossing-free and can be added as edges. Because earlier pieces
-of the same stroke are already in the graph when later ones are tested, self-intersection needs
-no special case beyond the first split.
+existing graph *at the same level* (see "Bridges"), until pieces are crossing-free and can be
+added as edges. Because earlier pieces of the same stroke are already in the graph when later ones
+are tested, self-intersection needs no special case beyond the first split.
 
 ## Verifying changes here
 
@@ -158,7 +156,7 @@ deadlocked.
   `addStroke` on plain 2-point strokes where possible so the exact resulting topology can be
   hand-verified rather than merely observed.
 - `traffic.test.ts` — the two per-frame invariants above and an arrivals-keep-rising/no-deadlock
-  check, all driven with `sim.step(graph, C.SIM_STEP)` in a loop exactly as described under
+  check, each run per control type with and without a bridge (`buildGrid(control, { flyover })`), all driven with `sim.step(graph, C.SIM_STEP)` in a loop exactly as described under
   "Driving the simulation in tests", against a fixed 2x2-junction grid built directly with
   `addNode`/`addEdge` (not `addStroke`) so the topology is exact and untouched by the
   simplify/smooth/weld pipeline.
@@ -390,7 +388,7 @@ signals use a fixed cycle. Plan file: `~/.claude/plans/start-with-the-planning-p
     trials of 90 s for plain, signal and priority: 0 violations. Roundabout: 26% of trials
     violated before the fixes; after them 1 in 1,500 trials (a 2.95 m scrape); after raising
     `ROUNDABOUT_ENTRY_LAG` from 2.5 to 4, 0 in 1,500. A residual rate is possible; if
-    `keeps every pair of vehicles at least MOVEMENT_CLEARANCE apart (control: roundabout)` ever
+    `keeps every pair of vehicles at least MOVEMENT_CLEARANCE apart` (control: roundabout) ever
     flakes, that is this, not a random failure. Method: run the sim in a loop with
     `buildGrid('roundabout')` and dump both vehicles' lane, s, v, ring angle and holding movement
     at the first violation; every cause found so far was visible in that dump.
@@ -498,3 +496,41 @@ Don't time the simulation through the page: when the browser pane is hidden,
 `requestAnimationFrame` runs at about 2 ticks per second. Call `window.sim.step(window.graph,
 1 / 60)` in a loop from the console instead; it is deterministic, independent of rendering, and
 fast (229 simulated seconds with ~170 vehicles took 0.2s of CPU).
+
+## Bridges (milestone 8, done)
+
+Spec: `docs/specs/2026-09-18-bridges-design.md`. Decided with the owner: the whole stroke is a
+bridge; Alt while drawing *and* a Bridge tool (`B`); one elevated level, so a bridge crossing a
+bridge (or itself) makes a normal junction up top; a bridge's ends weld to anything (ramps onto
+the ground), a ground stroke's end never welds to a bridge mid-span.
+
+- **Data.** `RoadEdge.bridge?: true`, saved in format 3 (older saves load as all ground). Node
+  level is derived: `isElevatedNode` = degree >= 2 and every road there is a bridge. A bridge's
+  dead end is on the ground.
+- **Ramps.** The `RAMP_LENGTH` (12 m) of a bridge at each end that meets the ground is at ground
+  level; `RoadGraph.elevatedRange` gives the span between (bounds are infinite at an elevated end;
+  null if the bridge is too short for both ramps). Every level question goes through it:
+  crossings split only where both roads are at the same level at that point (so a road crossing a
+  ramp gets a junction), `edgeNear(..., groundOnly)` skips elevated points, `Lane.elevated` is the
+  same span in lane coordinates, and `TrafficSim.levelOf(v)` reads it. `RAMP_LENGTH` must stay >=
+  the biggest junction box (`ROUNDABOUT_ZONE`) so a car in a ramp's box is on the ground, and <
+  `SNAP_RADIUS` so an end landing on a ramp welds to the ramp node.
+- **Stroke pieces carry `rampA`/`rampB`** while `addStroke` works its queue, because a piece's end
+  level is not yet visible in the graph: an end welded onto a node whose roads are all bridges
+  *becomes* elevated once this bridge joins, and a self-crossing node has no roads yet.
+- **Rendering is two passes** (ground, then bridge), each drawing its roads, heat, nodes, signals,
+  yields and cars; ramps are drawn on the ground, only the span as a deck (shadow, light rail).
+  Erase prefers a bridge where it is over a road.
+- **Simulation is unchanged**: a bridge adds no node where it crosses. The clearance invariant
+  skips pairs with different `levelOf`.
+- **Shallow-angle finding (not bridge-specific, not fixed).** The first flyover fixture was a
+  straight diagonal meeting the stubs at ~27 degrees and failed the clearance invariant near a
+  ramp. Same rate (4-5 of 20 trials) with the bridge flag removed: roads meeting at a shallow
+  angle bring their lanes within ~2 m outside the junction box, where nothing arbitrates. The
+  2x2 grid (all right angles) never showed it. The fixture now uses square ramps.
+- **Verified**: 0 violations in 160 trials of 90 s (4 controls, flyover). Mutation-checked:
+  removing the level check in `firstCrossing` fails 4 graph tests; removing the clearance
+  exemption fails the random flyover runs only sometimes (bridge traffic is sparse), so the
+  deterministic "car on the bridge and a car below it at one spot" test is the real guard.
+- **Disconnected bridges carry almost no traffic**: a bridge between two fresh dead ends is its
+  own component and `requestTrip` drops trips between components (see milestone 10).

@@ -10,11 +10,12 @@ import {
   rightNormal,
   sub,
 } from './geom';
-import { type JunctionControl, type RoadGraph } from './graph';
+import { type JunctionControl, type RoadGraph, type Span } from './graph';
 import {
   JUNCTION_RADIUS,
   LANE_OFFSET,
   MOVEMENT_CLEARANCE,
+  RAMP_LENGTH,
   ROUNDABOUT_RING_FRACTION,
   ROUNDABOUT_ZONE,
 } from './config';
@@ -39,6 +40,8 @@ export interface Lane {
   /** Cumulative arc length at each vertex. */
   cum: number[];
   length: number;
+  /** Where the lane is up on a bridge, in lane arc length; null on the ground. See `RoadGraph.elevatedRange`. */
+  elevated: Span | null;
 }
 
 export interface Pose {
@@ -106,7 +109,7 @@ function makeLane(id: number, edgeId: number, from: number, to: number, centre: 
   const points = offsetPolyline(centre, LANE_OFFSET);
   const cum = [0];
   for (let i = 1; i < points.length; i++) cum.push(cum[i - 1] + dist(points[i - 1], points[i]));
-  return { id, edgeId, from, to, points, cum, length: cum[cum.length - 1] };
+  return { id, edgeId, from, to, points, cum, length: cum[cum.length - 1], elevated: null };
 }
 
 export class LaneNetwork {
@@ -149,6 +152,21 @@ export class LaneNetwork {
     for (const edge of graph.edges.values()) {
       const forward = makeLane(edge.id * 2, edge.id, edge.a, edge.b, edge.points);
       const backward = makeLane(edge.id * 2 + 1, edge.id, edge.b, edge.a, [...edge.points].reverse());
+      const span = graph.elevatedRange(edge);
+      if (span) {
+        // Ramps are measured on each lane itself, not scaled from the centreline, so a ramp is
+        // exactly RAMP_LENGTH on every lane and always covers the junction box at its end.
+        const rampA = Number.isFinite(span.lo);
+        const rampB = Number.isFinite(span.hi);
+        forward.elevated = {
+          lo: rampA ? RAMP_LENGTH : -Infinity,
+          hi: rampB ? forward.length - RAMP_LENGTH : Infinity,
+        };
+        backward.elevated = {
+          lo: rampB ? RAMP_LENGTH : -Infinity,
+          hi: rampA ? backward.length - RAMP_LENGTH : Infinity,
+        };
+      }
       for (const lane of [forward, backward]) {
         if (lane.length < 1e-6) continue;
         this.lanes.set(lane.id, lane);

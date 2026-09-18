@@ -1,12 +1,40 @@
 import { describe, expect, it } from 'vitest';
 import { type JunctionControl, RoadGraph } from './graph';
-import { type Pose } from './lanes';
+import { type Lane, type Pose } from './lanes';
+import { Router } from './routing';
+import { arcLengthAt, closestOnPolyline } from './geom';
 import { TrafficSim, type Vehicle } from './traffic';
 import * as C from './config';
-import { buildGrid } from './testutil';
+import { FLYOVER_CROSSINGS, buildGrid } from './testutil';
 
 /** Every control type is held to the same invariants as a plain junction. `null` is plain. */
 const CONTROLS: Array<JunctionControl | null> = [null, 'signal', 'priority', 'roundabout'];
+
+/** Each control on the plain grid, and again with a bridge carrying traffic over it. */
+const CASES = CONTROLS.flatMap((control) => [
+  { control, flyover: false },
+  { control, flyover: true },
+]);
+
+/** Where a vehicle is and what it holds, for a failure message: enough to reconstruct the cause. */
+function vehicleSummary(p: { veh: Vehicle; pose: Pose; level: string }): string {
+  const v = p.veh;
+  const route = v.route.slice(Math.max(0, v.leg - 1), v.leg + 2).join('>');
+  return (
+    `#${v.id} lane ${v.route[v.leg]} (route ${route}) s=${v.s.toFixed(2)} v=${v.v.toFixed(2)} ` +
+    `at (${p.pose.pos.x.toFixed(1)}, ${p.pose.pos.y.toFixed(1)}) ${p.level} holding ${JSON.stringify(v.holding)}`
+  );
+}
+
+/** Positions of every vehicle, with its level, for pairwise distance checks. */
+function posesOf(sim: TrafficSim): Array<{ veh: Vehicle; pose: Pose; level: 'ground' | 'bridge' }> {
+  const poses = [];
+  for (const v of sim.vehicles) {
+    const pose = sim.poseOf(v);
+    if (pose) poses.push({ veh: v, pose, level: sim.levelOf(v) });
+  }
+  return poses;
+}
 
 describe('TrafficSim', () => {
   it('does not rebuild the lane network when the graph has not changed', () => {
@@ -24,12 +52,12 @@ describe('TrafficSim', () => {
     expect(sim.network.builtVersion).toBe(graph.version);
   });
 
-  describe.each(CONTROLS)('junction invariants over a sustained run (control: %s)', (control) => {
+  describe.each(CASES)('junction invariants over a sustained run (control: $control, flyover: $flyover)', ({ control, flyover }) => {
     const SIM_SECONDS = 60;
     const STEPS = Math.round(SIM_SECONDS / C.SIM_STEP);
 
     it('never overlaps two vehicles on the same lane', () => {
-      const graph = buildGrid(control);
+      const graph = buildGrid(control, { flyover });
       const sim = new TrafficSim();
       sim.running = true;
       let sawTraffic = false;
@@ -75,7 +103,7 @@ describe('TrafficSim', () => {
     // (30 trials x 60s): straight-through pairs bottom out at exactly 4.0m, turning pairs as
     // low as ~3.54m, never below MOVEMENT_CLEARANCE.
     it('keeps every pair of vehicles at least MOVEMENT_CLEARANCE apart', () => {
-      const graph = buildGrid(control);
+      const graph = buildGrid(control, { flyover });
       const sim = new TrafficSim();
       sim.running = true;
       let sawTraffic = false;
@@ -85,14 +113,11 @@ describe('TrafficSim', () => {
         sim.step(graph, C.SIM_STEP);
         if (sim.vehicles.length > 0) sawTraffic = true;
 
-        const poses: Array<{ veh: Vehicle; pose: Pose }> = [];
-        for (const v of sim.vehicles) {
-          const pose = sim.poseOf(v);
-          if (pose) poses.push({ veh: v, pose });
-        }
-
+        const poses = posesOf(sim);
         for (let a = 0; a < poses.length; a++) {
           for (let b = a + 1; b < poses.length; b++) {
+            // One passing over the other on a bridge is not a near miss.
+            if (poses[a].level !== poses[b].level) continue;
             const d = Math.hypot(
               poses[a].pose.pos.x - poses[b].pose.pos.x,
               poses[a].pose.pos.y - poses[b].pose.pos.y,
@@ -100,7 +125,8 @@ describe('TrafficSim', () => {
             if (d < minGap - 1e-2) {
               throw new Error(
                 `closest-approach violation at t=${sim.time.toFixed(3)}s: vehicle ${poses[a].veh.id} ` +
-                  `and ${poses[b].veh.id} are ${d.toFixed(3)}m apart (minimum is ${minGap.toFixed(3)}m)`,
+                  `and ${poses[b].veh.id} are ${d.toFixed(3)}m apart (minimum is ${minGap.toFixed(3)}m); ` +
+                  [poses[a], poses[b]].map(vehicleSummary).join('; '),
               );
             }
           }
@@ -111,8 +137,8 @@ describe('TrafficSim', () => {
     });
   });
 
-  it.each(CONTROLS)('keeps arrivals rising over a long run and avoids deadlock (control: %s)', (control) => {
-    const graph = buildGrid(control);
+  it.each(CASES)('keeps arrivals rising over a long run and avoids deadlock (control: $control, flyover: $flyover)', ({ control, flyover }) => {
+    const graph = buildGrid(control, { flyover });
     const sim = new TrafficSim();
     sim.running = true;
 
@@ -134,6 +160,112 @@ describe('TrafficSim', () => {
     expect(sim.stats().arrivals).toBeGreaterThan(0);
     expect(sim.failed).toBe(false);
   });
+  describe('bridges', () => {
+    it('puts no junction where the flyover crosses the grid', () => {
+      const graph = buildGrid(null, { flyover: true });
+      const sim = new TrafficSim();
+      sim.step(graph, C.SIM_STEP);
+      for (const p of FLYOVER_CROSSINGS) {
+        for (const node of graph.nodes.values()) {
+          expect(Math.hypot(node.pos.x - p.x, node.pos.y - p.y)).toBeGreaterThan(C.MERGE_DIST);
+        }
+      }
+      // Movements only exist at nodes, so none can be at the crossings; the ramps are the only
+      // junctions the bridge adds.
+      const bridge = [...graph.edges.values()].find((e) => e.bridge)!;
+      expect(sim.network.movements.has(bridge.a)).toBe(true);
+      expect(sim.network.movements.has(bridge.b)).toBe(true);
+    });
+
+    it('is on the ground on its ramps and up top between them', () => {
+      const graph = buildGrid(null, { flyover: true });
+      const sim = new TrafficSim();
+      sim.step(graph, C.SIM_STEP);
+      const bridge = [...graph.edges.values()].find((e) => e.bridge)!;
+      for (const laneId of [bridge.id * 2, bridge.id * 2 + 1]) {
+        const lane = sim.network.lanes.get(laneId)!;
+        expect(lane.elevated).toEqual({ lo: C.RAMP_LENGTH, hi: lane.length - C.RAMP_LENGTH });
+      }
+      for (const edge of graph.edges.values()) {
+        if (!edge.bridge) expect(sim.network.lanes.get(edge.id * 2)!.elevated).toBeNull();
+      }
+    });
+
+    it('is the route traffic takes between the corners it joins', () => {
+      const graph = buildGrid(null, { flyover: true });
+      const bridge = [...graph.edges.values()].find((e) => e.bridge)!;
+      // d1 (node 5) to d4 (node 8): the bridge beats going round the grid.
+      const router = new Router();
+      router.sync(graph);
+      expect(router.path(graph, 5, 8)).toContain(bridge.id);
+    });
+
+    // The state the clearance check's level exemption exists for: a car on the bridge right over
+    // a car on the road below, where their lanes cross. Without the exemption this is a violation.
+    it('puts a car on the bridge and a car below it at one spot, on different levels', () => {
+      const graph = buildGrid(null, { flyover: true });
+      const sim = new TrafficSim();
+      sim.step(graph, C.SIM_STEP);
+      const bridge = [...graph.edges.values()].find((e) => e.bridge)!;
+      const upper = sim.network.lanes.get(bridge.id * 2)!;
+      const lower = sim.network.lanes.get(2 * 2)!; // j1 -> j3, under the first crossing
+
+      let best = { d: Infinity, sUp: 0, sLow: 0 };
+      for (let sUp = 0; sUp < upper.length; sUp += 0.25) {
+        const hit = closestOnPolyline(sim.network.sample(upper, sUp).pos, lower.points)!;
+        if (hit.dist < best.d) {
+          best = { d: hit.dist, sUp, sLow: arcLengthAt(lower.points, hit.segIdx, hit.t) };
+        }
+      }
+      const car = (id: number, lane: Lane, s: number): Vehicle => ({
+        id,
+        route: [lane.id],
+        leg: 0,
+        s,
+        v: 0,
+        desiredSpeed: C.DESIRED_SPEED,
+        freeFlowTime: 20,
+        routeLength: lane.length,
+        legStart: [0],
+        holding: null,
+        tripStart: 0,
+      });
+      const up = car(9998, upper, best.sUp);
+      const down = car(9999, lower, best.sLow);
+      const d = Math.hypot(sim.poseOf(up)!.pos.x - sim.poseOf(down)!.pos.x, sim.poseOf(up)!.pos.y - sim.poseOf(down)!.pos.y);
+
+      expect(d).toBeLessThan(0.5);
+      expect(sim.levelOf(up)).toBe('bridge');
+      expect(sim.levelOf(down)).toBe('ground');
+    });
+
+    it('counts a car on a ramp, or in the ramp junction, as on the ground', () => {
+      const graph = buildGrid(null, { flyover: true });
+      const sim = new TrafficSim();
+      sim.step(graph, C.SIM_STEP);
+      const bridge = [...graph.edges.values()].find((e) => e.bridge)!;
+      const lane = sim.network.lanes.get(bridge.id * 2)!;
+      const at = (s: number): Vehicle => ({
+        id: 9999,
+        route: [lane.id],
+        leg: 0,
+        s,
+        v: 0,
+        desiredSpeed: C.DESIRED_SPEED,
+        freeFlowTime: 20,
+        routeLength: lane.length,
+        legStart: [0],
+        holding: null,
+        tripStart: 0,
+      });
+      expect(sim.levelOf(at(1))).toBe('ground');
+      expect(sim.levelOf(at(C.RAMP_LENGTH - 0.1))).toBe('ground');
+      expect(sim.levelOf(at(C.RAMP_LENGTH + 0.1))).toBe('bridge');
+      expect(sim.levelOf(at(lane.length - C.RAMP_LENGTH - 0.1))).toBe('bridge');
+      expect(sim.levelOf(at(lane.length - 1))).toBe('ground');
+    });
+  });
+
   describe('signals', () => {
     it('groups opposite approaches into two phases at a four-way, one of them green at a time', () => {
       const graph = buildGrid('signal');
