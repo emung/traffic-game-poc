@@ -1,8 +1,13 @@
 # Project memories
 
+## Working in this repo
+
+Work goes straight onto `main`. The owner confirmed on 2026-09-18 that this personal repo does
+not use feature branches, so there is no need to ask before editing files on `main`.
+
 ## Scope and roadmap
 
-Prototype milestones, in order. All four are done; nothing further is planned yet.
+Milestones are built one at a time. 1–4 were the v0 prototype and are done; 5–17 are candidates.
 
 1. **Drawing -> road graph** (done) — freehand strokes become a clean node/edge graph.
 2. **Traffic simulation** (done) — dead-end spawners, Dijkstra routing, IDM car-following,
@@ -11,8 +16,65 @@ Prototype milestones, in order. All four are done; nothing further is planned ye
 4. **Minimal UI** (done) — toolbar, 1x/2x/4x speed, time frozen while drawing, wave
    countdown, best-wave record.
 
-Deliberately out of scope for v0: multiple road types, one-ways, traffic lights,
-zoning/economy. Roads are one lane per direction.
+v0 deliberately left out multiple road types, one-ways, traffic lights, zoning and any economy,
+and roads are one lane per direction. Road types, junction tools and a budget are now candidates;
+zoning is not.
+
+### Candidate milestones
+
+None is started. Each begins only when picked, with its design questions settled then. Tests (5)
+then congestion-aware routing (6) are the recommended next steps. Beyond that the list is grouped
+by theme, not ranked: problems the simulation exposed (6–8), costs and goals (9–11), feedback
+(12–14) and quality of life (15–17).
+
+5. **Automated tests** — there are none. Every check so far was run by hand in the console, and
+   each one caught a real bug. Turn the cases under "Verifying changes here" into a suite before
+   6, so routing changes cannot quietly break the junction invariants. Vitest fits the Vite
+   setup, and only `main.ts` touches the DOM, so graph and simulation can run headless. Trip ends
+   and driver speeds come from `Math.random`, so reproducible runs need a seeded source; 14 needs
+   one too.
+6. **Congestion-aware routing** — routes are static shortest-distance, so a new road carries every
+   trip it shortens and no other, whatever the traffic: a bypass drawn around a jam either stays
+   empty or inherits the whole jam. Route on travel time instead, using the per-lane speeds the
+   congestion overlay already smooths. Naive rerouting sends everyone onto the new road and then
+   back, so it needs damping, and the per-pair route cache has to expire.
+7. **Junction tools** — junctions are the capacity limit, about 3 s per vehicle, and drawing more
+   road is the only fix today. Candidates: traffic lights, priority roads, roundabouts. Which of
+   them, and how the player places one, is the first decision.
+8. **Bridges** — every crossing becomes a junction. A modifier key while drawing would carry a
+   road over the others with no node, so no conflict points. `addStroke` splits at every crossing
+   and rendering has no layers, so both need changing; the simulation only interacts at nodes and
+   should need no change.
+9. **Road budget** — nothing stops the player paving everything. Charge per metre, more for
+   bridges, so every stroke is a trade-off. Open: refunds on erase and undo, and how the budget
+   grows between waves.
+10. **Fixed entrances or designed levels** — every dead end is an entrance, so the player decides
+    where traffic comes from. The request rate depends only on the wave and origins are uniform
+    over dead ends, so each extra stub thins the load on every entrance; whether that wins is
+    untested. Worse, `requestTrip` drops a trip whose ends are not connected, so a few isolated
+    roads should make much of the demand vanish, reopening the hole that "Unserved demand has to
+    count" closed (read from the code, not measured). Entrances at the map edge, or scenarios
+    such as a stadium or a commuter rush, would close both and give runs goals to replay.
+11. **Road types** — multi-lane arterials, one-way streets, speed limits. A speed limit is a
+    per-edge cap on desired speed. One-ways need the router to respect direction; it walks edges
+    both ways today. Multi-lane roads need lane changing, the biggest simulation change on this
+    list, and may deserve a milestone of their own.
+12. **Junction inspector** — click a junction to see its throughput, average wait, and which
+    movements block each other. Today only the congestion overlay, and busy junctions in debug
+    mode, hint at why a junction fails.
+13. **Route display** — click a car to highlight its route, or show where trips come from and go
+    to. It explains why a road is busy, which matters more once routes react to congestion.
+14. **Before/after comparison** — replay the same demand on the old and the new network, so a
+    change is shown to help rather than judged by eye. Needs seeded demand (see 5) and a network
+    snapshot.
+15. **Better editing** — redo, dragging a point to reshape a road, Shift for straight lines. Undo
+    is a stack of graph snapshots, so redo is a second stack. A reshaped road must stay welded to
+    its nodes and can newly cross others, so it goes back through the crossing split.
+16. **Save slots and export/import** — the map is one localStorage key in one browser, with no
+    second slot and no way to move it. Named slots, plus JSON export/import for sharing; add a
+    format version now, since bridges and road types will change the format.
+17. **Touch support** — pinch to zoom, two-finger pan, toolbar buttons sized for fingers. Drawing
+    already uses pointer events and the canvas sets `touch-action: none`.
 
 ## Decisions
 
@@ -128,7 +190,8 @@ demand is now a rate that ramps in waves (see the feedback loop section).
 
 Routing is static shortest-distance, so all traffic funnels onto the same path and hotspots are
 sharper than in reality. That is arguably the right behaviour for a game about spotting
-bottlenecks, but it is a modelling choice, not an accident.
+bottlenecks, but it is a modelling choice, not an accident, and candidate milestone 6 proposes
+changing it.
 
 
 ## Feedback loop
